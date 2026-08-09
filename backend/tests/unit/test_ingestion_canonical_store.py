@@ -20,6 +20,11 @@ from app.db.models.elements import Element
 from app.ingestion import canonical_store as cs
 from app.ingestion.cascade_trigger import TASK_TABLE_REPARSE, TASK_VISUAL_DESCRIPTION, CascadeTask
 from app.ingestion.docling_parser import DoclingParseResult, ElementDraft, PageConfidence
+from app.ingestion.kg_candidate_extractor import (
+    ElementKGCandidates,
+    KGCandidateEntity,
+    KGCandidateRelation,
+)
 from app.ingestion.paddleocr_vl_cascade import (
     CascadeResult,
     TableReparseResult,
@@ -457,3 +462,96 @@ def test_store_pages_and_elements_multi_page(tmp_path: Path) -> None:
     assert summary.elements_stored == 2
     pages = db.execute(select(Page).order_by(Page.page_number)).scalars().all()
     assert [p.page_number for p in pages] == [1, 2]
+
+
+def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["Check TH3 near the compressor."])
+    db = _make_session()
+    document = _basic_document(db, page_count=1)
+    storage = FakeObjectStorageClient()
+
+    parse_result = DoclingParseResult(
+        elements=[_element(local_id=1, text="Check TH3 near the compressor.")],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+    kg_candidates = {
+        1: ElementKGCandidates(
+            entities=[
+                KGCandidateEntity(
+                    name="TH3",
+                    entity_type="Sensor",
+                    confidence=0.7,
+                    source_document="manual.pdf",
+                    page=1,
+                    element_id=1,
+                )
+            ],
+            relations=[
+                KGCandidateRelation(
+                    subject="compressor",
+                    predicate="CONNECTED_TO",
+                    object="TH3",
+                    confidence=0.5,
+                    source_document="manual.pdf",
+                    page=1,
+                    element_id=1,
+                )
+            ],
+        )
+    }
+
+    cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=parse_result,
+        kg_candidates=kg_candidates,
+    )
+
+    element = db.execute(select(Element)).scalar_one()
+    assert element.kg_candidate_entities == [
+        {
+            "name": "TH3",
+            "entity_type": "Sensor",
+            "confidence": 0.7,
+            "source_document": "manual.pdf",
+            "page": 1,
+            "element_id": 1,
+        }
+    ]
+    assert element.kg_candidate_relations == [
+        {
+            "subject": "compressor",
+            "predicate": "CONNECTED_TO",
+            "object": "TH3",
+            "confidence": 0.5,
+            "source_document": "manual.pdf",
+            "page": 1,
+            "element_id": 1,
+        }
+    ]
+
+
+def test_store_pages_and_elements_kg_candidates_default_empty(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["No candidates here."])
+    db = _make_session()
+    document = _basic_document(db, page_count=1)
+    storage = FakeObjectStorageClient()
+
+    parse_result = DoclingParseResult(
+        elements=[_element(local_id=1, text="No candidates here.")],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+
+    cs.store_pages_and_elements(
+        db, storage, document=document, pdf_path=pdf_path, parse_result=parse_result
+    )
+
+    element = db.execute(select(Element)).scalar_one()
+    assert element.kg_candidate_entities == []
+    assert element.kg_candidate_relations == []

@@ -113,8 +113,9 @@ class Settings(BaseSettings):
     # relevant when OBJECT_STORAGE_BACKEND=local.
     OBJECT_STORAGE_LOCAL_TOKEN_SECRET: str = "dev-only-insecure-local-storage-token-secret"
 
-    # ---- Redis (Celery broker + cache), see
-    # Documentation/system-design/01-architecture-overview.md §2/§6 ----
+    # ---- Redis (Celery broker/cache + /auth/login rate limiter), see
+    # Documentation/system-design/01-architecture-overview.md §2/§6 and
+    # Documentation/system-design/08-authentication-rbac.md §5 ----
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
@@ -123,6 +124,22 @@ class Settings(BaseSettings):
     # ---- Celery ----
     CELERY_TASK_DEFAULT_QUEUE: str = "default"
     CELERY_GPU_QUEUE: str = "gpu"
+
+    # ---- Authentication & RBAC, see
+    # Documentation/system-design/08-authentication-rbac.md ----
+    JWT_SECRET_KEY: str = "dev-only-insecure-jwt-secret-change-me"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    REFRESH_TOKEN_COOKIE_NAME: str = "refresh_token"
+    REFRESH_TOKEN_COOKIE_PATH: str = "/api/v1/auth"
+    # bcrypt cost factor — see 08-authentication-rbac.md §2 (14 evaluated as
+    # appropriate for this project's scale, MUST be offloaded to a thread
+    # pool since it's a ~1s CPU-bound synchronous call, see app/auth/password.py)
+    BCRYPT_COST_FACTOR: int = 14
+    # /auth/login rate limiting — see 08-authentication-rbac.md §5.1
+    LOGIN_RATE_LIMIT_MAX_ATTEMPTS: int = 5
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = 900
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod

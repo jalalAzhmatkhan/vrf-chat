@@ -7,38 +7,67 @@ table re-parse (`table_reparse`), figure/icon semantic understanding
 (`visual_description`), and full-page OCR fallback (`full_page_ocr`).
 
 WAJIB (RTX 3060 6GB dev, `02-ingestion-pipeline.md` §4): Docling (Stage 2)
-and PaddleOCR-VL must never be GPU-resident simultaneously. The ingestion
-orchestrator (I1.10) MUST call `DoclingParser.unload()`
-(`app/ingestion/docling_parser.py`) before constructing a
-`LocalPaddleOCRVLClient` — `require_docling_unloaded_before_paddle_stage()`
-below is an enforced guard for that, not just a documentation convention.
+and PaddleOCR-VL must never be GPU-resident simultaneously.
+`require_docling_unloaded_before_paddle_stage()` below is an enforced guard
+for the (now largely hypothetical, see next paragraph) same-process case.
+
+**[REVISI 2026-08-09, I1.6 finding + §4.0 keputusan Opsi 3]** `backend-worker-gpu`
+now **only** runs Docling — `PADDLE_OCR_VL_BACKEND=local` is **not used** by
+`backend-worker-gpu` (`remote_api` is the only backend it's configured with,
+pointing at the separate `paddleocr-vl-service`, see
+`vrf-chat/paddleocr-vl-service/`). Root cause: `paddlepaddle-gpu` (needed
+by `LocalPaddleOCRVLClient`'s layout submodel) and `torch` (used by
+Docling) vendor incompatible `nvidia-nccl-cu12` pip packages into the same
+venv, breaking `import torch` entirely — a packaging conflict, not a VRAM
+one (see `docs/i1.6-vram-benchmark-report.md` §6). `LocalPaddleOCRVLClient`
+is **kept in this module** (still implements the `PaddleOCRVLClient`
+Protocol, still fully unit-tested) purely for interface completeness/
+documentation and as the reference implementation `paddleocr-vl-service`'s
+own FastAPI app is modeled on — `paddleocr` is **no longer a `backend/`
+dependency** (removed from `pyproject.toml`; `_build_local_pipeline`'s
+`from paddleocr import PaddleOCRVL` import is lazy/pragma-excluded, so this
+module still imports/type-checks fine without it installed). Constructing
+`LocalPaddleOCRVLClient` for real from within `backend/` would now fail
+with `ModuleNotFoundError` — this is intentional, not a latent bug.
+
+**Separately confirmed important finding** (I1.10 live verification,
+`paddleocr-vl-service`'s own isolated venv, `torch` genuinely absent —
+PaddleOCR-VL's core pipeline runs entirely on PaddlePaddle's own inference
+engine, `torch` was never actually a hard requirement despite earlier
+assumption): real single-image inference peaked at **~5.98GB VRAM out of
+6.14GB** (RTX 3060 6GB) — see `vrf-chat/paddleocr-vl-service/README.md` for
+full detail. This is far higher than the design doc §4's "~2.5-4GB"
+estimate and leaves only ~150MB headroom, a critical operational
+consideration flagged separately.
 
 Two backends, both implemented from the start (per design doc §4
 "Portabilitas ke cloud GPU"/DIRECT MESSAGE to Backend Engineer):
 - `local` — in-process inference via the `paddleocr` package's `PaddleOCRVL`
   pipeline (`vl_rec_backend="native"`), `PADDLE_OCR_VL_BATCH_SIZE=1` and
-  `PADDLE_OCR_VL_DTYPE=fp16` wajib in dev.
+  `PADDLE_OCR_VL_DTYPE=fp16` wajib in dev. **Not used by `backend-worker-gpu`
+  in this project's actual deployment** (see revision note above) — kept as
+  a general-purpose, backend-agnostic class other deployments could use.
 - `remote_api` — a generic HTTP JSON contract this project defines itself
   (POST base64 PNG to `{PADDLE_OCR_VL_API_URL}/{describe_figure,
   reparse_table,ocr_page}`, see `RemoteAPIPaddleOCRVLClient`), deliberately
   NOT coupled to PaddleOCR-VL's own `vllm-server`/`sglang-server`/etc.
-  serving protocols, so "self-hosted di cloud GPU terpisah, atau layanan
-  pihak ketiga yang kompatibel" (design doc §4) stays a simple contract to
-  implement server-side, not a specific vendor's wire format.
+  serving protocols. **This is what `backend-worker-gpu` actually uses**,
+  pointed at `paddleocr-vl-service` (a container-boundary "remote", not
+  necessarily a network-distant one).
 
 Coverage/testing trade-off (documented per task instructions): actually
 constructing the local `PaddleOCRVL` pipeline and running real inference
-downloads/executes a multi-GB vision-language model (ERNIE4.5-0.3B based) —
-genuinely GPU-appropriate work, not meaningfully unit-testable. Those two
-boundaries (`_build_local_pipeline`, `LocalPaddleOCRVLClient._run_predict`)
-are `# pragma: no cover` with this rationale; everything around them
-(orchestration, response mapping, config validation, the remote HTTP client
-via `httpx.MockTransport`) is fully unit-tested. Real local-backend
-execution is verified separately during the I1.6 WSL GPU benchmark — see
-that STATUS REPORT once run, this is the same trade-off already accepted for
-`remote_api` per the original task instructions, extended here to `local`
-for the identical reason (no real endpoint/model available to exercise in
-this dev shell in a way that's fast/reproducible for the unit test suite).
+downloads/executes a multi-GB vision-language model (ERNIE4.5-0.9B based) —
+genuinely GPU-appropriate work, not meaningfully unit-testable from
+`backend/` (which, per the revision above, no longer even has `paddleocr`
+installed). Those two boundaries (`_build_local_pipeline`,
+`LocalPaddleOCRVLClient._run_predict`) are `# pragma: no cover` with this
+rationale; everything around them (orchestration, response mapping, config
+validation, the remote HTTP client via `httpx.MockTransport`) is fully
+unit-tested. Real local-backend execution (construction + actual inference,
+including the markdown output schema `_extract_markdown_text` maps) WAS
+verified live during I1.10, in `paddleocr-vl-service`'s own isolated venv —
+see that service's README for the full transcript/findings.
 """
 
 from __future__ import annotations

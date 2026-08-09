@@ -34,6 +34,7 @@ ALL_SCOPES = [
     "chat:read",
     "chat:write",
     "documents:read",
+    "documents:write",
     "admin:rbac:read",
     "admin:rbac:write",
 ]

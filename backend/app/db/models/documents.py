@@ -21,6 +21,14 @@ class Document(Base):
     model_family: Mapped[str | None] = mapped_column(String(256), nullable=True)
     filename: Mapped[str] = mapped_column(String(512))
     source_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    # I1.10: canonical object storage URI of the original uploaded PDF (the
+    # exact string `ObjectStorageClient.put_object()` returned — e.g.
+    # `s3://bucket/key` or `file://key`), so a Celery worker (a different
+    # process/container than the API that received the upload) can
+    # re-materialize the file locally for PyMuPDF/Docling. NOT reconstructed
+    # from a hardcoded scheme guess — that would break for non-`local`
+    # backends (see app/ingestion/orchestrator.py `materialize_source_pdf`).
+    source_pdf_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="queued")

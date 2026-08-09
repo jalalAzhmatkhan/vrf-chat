@@ -1,0 +1,51 @@
+[project]
+name = "paddleocr-vl-service"
+version = "0.1.0"
+description = "Standalone PaddleOCR-VL inference service (Stage 4 remote_api backend), see Documentation/system-design/02-ingestion-pipeline.md §4.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.1",
+    "pydantic-settings>=2",
+    "paddleocr[doc-parser]>=3.7.0",
+    # Deliberately a direct wheel URL, not a version constraint resolved
+    # from a `[[tool.uv.index]]` — see README.md "Why a direct wheel URL"
+    # for the full rationale (short version: PaddlePaddle's own wheel index
+    # is per-CUDA-version-namespaced in a way `uv`'s standard index/source
+    # config handles awkwardly for a single pinned combination, and this
+    # service's Dockerfile always builds linux/cp312 — a direct URL is the
+    # simplest reliable pin for that one target, verified working in I1.10
+    # live testing). `sys_platform == 'linux'` marker: this project is only
+    # ever meant to run in the Linux container built by this Dockerfile —
+    # `uv sync` on a non-Linux host (e.g. accidentally on Windows dev) will
+    # simply skip this dependency rather than fail confusingly.
+    "paddlepaddle-gpu @ https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux'",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false

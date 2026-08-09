@@ -10,6 +10,7 @@ __pycache__/
 htmlcov/
 *.egg-info/
 data/object-storage/
+data/object-storage-test/
 data/chroma/
 *.db
 *.sqlite3

@@ -1,0 +1,89 @@
+/* Sidebar — Documentation/ui-ux-design/01-design-system.md §8,
+   03-app-shell-navigation.md §2. */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  background: var(--color-bg-surface);
+  border-right: 1px solid var(--color-border-subtle);
+  transition: width var(--duration-base) var(--ease-standard);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.sidebar.collapsed {
+  width: 64px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 64px;
+  padding: 0 var(--space-4);
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.brandMark {
+  font-size: var(--font-size-lg);
+  color: var(--color-accent-cyan);
+  flex-shrink: 0;
+}
+
+.brandLabel {
+  font-family: var(--font-family-display);
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-base);
+  white-space: nowrap;
+}
+
+.nav {
+  flex: 1;
+  padding: var(--space-3) var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sectionLabel {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-tertiary);
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  white-space: nowrap;
+}
+
+.footer {
+  padding: var(--space-2);
+  border-top: 1px solid var(--color-border-subtle);
+  flex-shrink: 0;
+}
+
+.collapseToggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.collapseToggle:hover {
+  background: var(--color-bg-surface-raised);
+  color: var(--color-accent-cyan);
+}
+
+.collapseToggle:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: 2px;
+}

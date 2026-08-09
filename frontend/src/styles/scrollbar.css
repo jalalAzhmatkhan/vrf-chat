@@ -1,0 +1,86 @@
+/*
+ * Custom scrollbar — spec: Documentation/ui-ux-design/01-design-system.md §6.
+ *
+ * Applied globally via the `.scroll-region` utility class (opt-in per
+ * scrollable container: sidebar nav, main content, tables with overflow,
+ * dropdowns) rather than blanket `*`, so we can exclude elements found to
+ * have real perf issues (e.g. fast-typed <textarea>) per §6 last bullet.
+ *
+ * Full hover/active/glow styling only reaches WebKit browsers
+ * (`::-webkit-scrollbar*`), which is an accepted, documented degradation —
+ * Firefox gets the static `scrollbar-width: thin` fallback below (§6,
+ * "Cross-browser" bullet). This is not an oversight.
+ */
+
+.scroll-region {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb-idle) transparent;
+}
+
+.scroll-region::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scroll-region::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-region::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.scroll-region::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-idle);
+  border-radius: var(--radius-full);
+  min-height: 24px;
+  min-width: 24px;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    width var(--duration-fast) var(--ease-standard);
+}
+
+.scroll-region:hover::-webkit-scrollbar-thumb,
+.scroll-region:active::-webkit-scrollbar-thumb {
+  width: 8px;
+}
+
+.scroll-region:hover::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-hover);
+  box-shadow: var(--scrollbar-glow-hover);
+}
+
+.scroll-region:active::-webkit-scrollbar-thumb,
+.scroll-region.is-dragging::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-active);
+  box-shadow: var(--scrollbar-glow-active);
+}
+
+/*
+ * Idle fade: THUMB opacity (not container/content opacity) drops to ~0.15
+ * after ~1200ms of no scroll/hover, rises back to full on hover/scroll. The
+ * 1200ms idle detection is JS-driven (see hooks/useScrollbarIdle.js) which
+ * toggles `.is-idle` on the scroll container — implemented as a dimmed thumb
+ * color (not container opacity) so page content never fades along with it.
+ */
+.scroll-region.is-idle::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-idle-faded);
+  box-shadow: none;
+  transition: background-color var(--duration-slow) var(--ease-standard);
+}
+
+.scroll-region.is-idle:hover::-webkit-scrollbar-thumb,
+.scroll-region.is-idle:active::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb-hover);
+  box-shadow: var(--scrollbar-glow-hover);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-region,
+  .scroll-region::-webkit-scrollbar-thumb,
+  .scroll-region.is-idle::-webkit-scrollbar-thumb {
+    transition: none;
+  }
+}

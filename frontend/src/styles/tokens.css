@@ -1,0 +1,192 @@
+/*
+ * Design tokens — source of truth: Documentation/ui-ux-design/01-design-system.md
+ * Token names are intentionally identical to the design document (§2-§5) so
+ * that design & code share one vocabulary. Do not rename tokens here without
+ * updating the design document first (frontend-engineer.md access rules).
+ *
+ * Dark mode is the default and only mode wired to the UI in Phase 0 (§2.1 —
+ * "switch UI" is deferred). Light-mode values are still defined below on the
+ * `[data-theme='light']` selector so no refactor is needed later.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* 2.2 — Background & Border (dark, default) */
+  --color-bg-canvas: #0a0e17;
+  --color-bg-surface: #10151f;
+  --color-bg-surface-raised: #161c2a;
+  --color-bg-surface-sunken: #060810;
+  --color-border-subtle: #232b3d;
+  --color-border-default: #2e374c;
+  --color-border-strong: #3e4a66;
+
+  /* 2.3 — Accent (Brand/Tech) */
+  --color-accent-cyan: #22d3ee;
+  --color-accent-cyan-muted: #0e7490;
+  --color-accent-violet: #8b5cf6;
+  --gradient-accent: linear-gradient(135deg, #22d3ee 0%, #8b5cf6 100%);
+
+  /* 2.4 — Text */
+  --color-text-primary: #e8edf7;
+  --color-text-secondary: #a3afc7;
+  --color-text-tertiary: #6b7690;
+  --color-text-disabled: #454f66;
+  --color-text-inverse: #0a0e17;
+
+  /* 2.5 — Semantic / Status */
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #f87171;
+  --color-info: #38bdf8;
+  --color-safety: #ff4d6d;
+
+  /* Badge/alert tint backgrounds derived from semantic colors (§2.5, §7.4) */
+  --color-success-tint: rgba(52, 211, 153, 0.12);
+  --color-warning-tint: rgba(251, 191, 36, 0.12);
+  --color-danger-tint: rgba(248, 113, 113, 0.12);
+  --color-info-tint: rgba(56, 189, 248, 0.12);
+  --color-safety-tint: rgba(255, 77, 109, 0.14);
+
+  /* 2.6 — Circuit pattern (decorative only, see §2.6) */
+  --pattern-circuit-grid-opacity: 0.05;
+  --pattern-circuit-grid-color: var(--color-accent-cyan);
+
+  /* 3.1 — Font pairing */
+  --font-family-sans: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+  --font-family-display: 'Space Grotesk', 'Inter', sans-serif;
+  --font-family-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* 3.2 — Type scale (rem, base 16px) */
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-md: 1.125rem;
+  --font-size-lg: 1.25rem;
+  --font-size-xl: 1.5rem;
+  --font-size-2xl: 1.875rem;
+  --font-size-3xl: 2.25rem;
+
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.7;
+
+  /* 3.3 — Font weight */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* 4.1 — Spacing (grid 4px) */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+
+  /* 4.2 — Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* 4.3 — Breakpoints (informational — used as JS constants too, see lib/breakpoints.js) */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
+
+  /* 4.4 — Elevation (z-index) */
+  --z-base: 0;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+
+  /* 5.1 — Motion durations */
+  --duration-instant: 100ms;
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --duration-slow: 400ms;
+  --duration-slower: 600ms;
+
+  /* 5.2 — Easing */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* 7.1 — Glow tokens */
+  --glow-accent-cyan: 0 0 0 1px rgba(34, 211, 238, 0.4), 0 0 16px rgba(34, 211, 238, 0.25);
+  --glow-danger: 0 0 0 1px rgba(248, 113, 113, 0.4), 0 0 16px rgba(248, 113, 113, 0.2);
+
+  /* 7.5 — Elevation shadows */
+  --shadow-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-elevation-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-elevation-3: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  /* §6 — Scrollbar tokens (dark) */
+  --scrollbar-thumb-idle: rgba(163, 175, 199, 0.25);
+  /* idle thumb color faded to ~15% opacity per §6 "fade saat idle" (0.25 * 0.15) */
+  --scrollbar-thumb-idle-faded: rgba(163, 175, 199, 0.0375);
+  --scrollbar-thumb-hover: rgba(34, 211, 238, 0.55);
+  --scrollbar-thumb-active: #22d3ee;
+  --scrollbar-glow-hover: 0 0 6px rgba(34, 211, 238, 0.35);
+  --scrollbar-glow-active: 0 0 10px rgba(34, 211, 238, 0.55);
+}
+
+/*
+ * Light mode tokens — defined per §2.1 so no refactor is needed when the
+ * theme switch UI ships. Not wired to any toggle in Phase 0.
+ */
+[data-theme='light'] {
+  color-scheme: light;
+
+  --color-bg-canvas: #f4f6fb;
+  --color-bg-surface: #ffffff;
+  --color-bg-surface-raised: #ffffff;
+  --color-bg-surface-sunken: #eef1f8;
+  --color-border-subtle: #e2e6f0;
+  --color-border-default: #cbd2e1;
+  --color-border-strong: #aeb8cc;
+
+  --color-accent-cyan: #0891b2;
+  --color-accent-cyan-muted: #0e7490;
+  --color-accent-violet: #7c3aed;
+
+  --color-text-primary: #10151f;
+  --color-text-secondary: #48526b;
+  --color-text-tertiary: #6b7690;
+  --color-text-disabled: #9aa3b8;
+  --color-text-inverse: #ffffff;
+
+  --color-success: #059669;
+  --color-warning: #b45309;
+  --color-danger: #dc2626;
+  --color-info: #0284c7;
+  --color-safety: #e11d48;
+
+  --color-success-tint: rgba(5, 150, 105, 0.1);
+  --color-warning-tint: rgba(180, 83, 9, 0.1);
+  --color-danger-tint: rgba(220, 38, 38, 0.1);
+  --color-info-tint: rgba(2, 132, 199, 0.1);
+  --color-safety-tint: rgba(225, 29, 72, 0.1);
+
+  --pattern-circuit-grid-opacity: 0.025;
+
+  --scrollbar-thumb-idle: rgba(72, 82, 107, 0.25);
+  --scrollbar-thumb-idle-faded: rgba(72, 82, 107, 0.0375);
+  --scrollbar-thumb-hover: rgba(8, 145, 178, 0.55);
+  --scrollbar-thumb-active: #0891b2;
+}

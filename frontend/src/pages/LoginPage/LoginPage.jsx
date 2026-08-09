@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useAuth } from '../../auth/AuthContext';
+import { useAuth } from '../../auth/useAuth';
 import { Button } from '../../components/Button/Button';
 import { Input } from '../../components/Input/Input';
 import { formatMinutesSeconds, useLoginRateLimitCountdown } from './useLoginRateLimitCountdown';

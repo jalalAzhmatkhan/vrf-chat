@@ -186,6 +186,32 @@ class Settings(BaseSettings):
     PADDLE_OCR_VL_API_KEY: str | None = None
     PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 60
 
+    # ---- Vector Store abstraction, see
+    # Documentation/system-design/04-provider-abstractions.md Bagian D and
+    # app/retrieval/vector_store.py. Default MVP: Qdrant — the only provider
+    # actually implemented; chroma/milvus fields are declared (per the
+    # design doc's full .env schema) but `build_vector_store_client` raises
+    # NotImplementedError for them (documented future work, Bagian D §6). ----
+    VECTOR_STORE_PROVIDER: Literal["qdrant", "chroma", "milvus"] = "qdrant"
+    VECTOR_STORE_COLLECTION: str = "vrf_chunks"
+    # 384 = BAAI/bge-small-en-v1.5 (EMBEDDER_DENSE_MODEL default) output dim.
+    VECTOR_STORE_DENSE_DIM: int = 384
+    VECTOR_STORE_QDRANT_URL: str = "http://localhost:6333"
+    VECTOR_STORE_QDRANT_API_KEY: str | None = None
+    VECTOR_STORE_CHROMA_MODE: Literal["embedded", "http"] = "embedded"
+    VECTOR_STORE_CHROMA_HOST: str | None = None
+    VECTOR_STORE_CHROMA_PORT: int = 8000
+    VECTOR_STORE_CHROMA_PERSIST_DIR: str = "./data/chroma"
+    VECTOR_STORE_MILVUS_URI: str = "http://localhost:19530"
+    VECTOR_STORE_MILVUS_TOKEN: str | None = None
+
+    # ---- Ingestion Stage: chunk embedding (I1.8), see
+    # Documentation/system-design/03-retrieval-chunking.md §6. fastembed
+    # (ONNX runtime, CPU-friendly — no GPU/VRAM contention with Docling/
+    # PaddleOCR-VL) for both dense and sparse (Qdrant-native BM25). ----
+    EMBEDDER_DENSE_MODEL: str = "BAAI/bge-small-en-v1.5"
+    EMBEDDER_SPARSE_MODEL: str = "Qdrant/bm25"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

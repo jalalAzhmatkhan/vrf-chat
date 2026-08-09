@@ -44,6 +44,24 @@ The connection URL is built from `DB_ENGINE`/`DB_HOST`/... in `.env` (see
 `app/db/engine.py` and `alembic/env.py`) — `alembic.ini`'s `sqlalchemy.url` is
 intentionally left blank.
 
+### Auth/RBAC seed data + admin bootstrap
+
+`alembic upgrade head` also runs a **data migration**
+(`184c1548d41a_seed_auth_rbac_roles_scopes_and_.py`) that seeds the 2 default
+roles + 10 scopes + `role_scopes` mapping (`admin` gets every scope, `user`
+gets `chat:read`/`chat:write`/`documents:read`) per
+`Documentation/system-design/08-authentication-rbac.md` §4, and idempotently
+bootstraps the first admin account from `FIRST_SUPERUSER_EMAIL`/
+`FIRST_SUPERUSER_PASSWORD` (skipped if unset, or if a user with that email
+already exists — safe to re-run). This replaces the standalone bootstrap
+script originally sketched as a separate CLI tool.
+
+**Convention for future scopes**: any migration that adds a new row to
+`scopes` MUST also insert the corresponding `role_scopes` row for `admin` in
+the *same* migration (see `08-authentication-rbac.md` §3.4 — admin access is
+enforced via explicit, auditable `role_scopes` rows, never a hardcoded
+`if role == "admin"` bypass).
+
 ## Tests
 
 ```bash

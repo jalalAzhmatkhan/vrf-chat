@@ -56,6 +56,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # app instances in-process) rather than the process-wide cached one.
     app.dependency_overrides[get_settings] = lambda: settings
 
+    # Make routes that depend on `get_settings` see the *same* settings
+    # instance this app was built with, even when a custom `settings` was
+    # passed in (tests, multiple app instances in-process) rather than the
+    # process-wide cached one — otherwise e.g. JWT verification in
+    # app/auth/security.py would silently use real-env settings instead of
+    # the test's, causing hard-to-diagnose signature mismatches.
+    app.dependency_overrides[get_settings] = lambda: settings
+
     return app
 
 

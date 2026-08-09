@@ -184,17 +184,32 @@ class Settings(BaseSettings):
     PADDLE_OCR_VL_MAX_CONCURRENT_WORKERS: int = 1
     PADDLE_OCR_VL_API_URL: str | None = None
     PADDLE_OCR_VL_API_KEY: str | None = None
-    # [I1.10 live finding] 60s (the original starting-point default) was too
-    # short — real single-image PaddleOCR-VL inference (paddleocr-vl-service,
-    # 0.9B-parameter VLM, RTX 3060 6GB) observed taking 30-60+s, occasionally
-    # tripping httpx's ReadTimeout during the 286-page Zeggo VRV IV REYQ E2E
-    # proof run. Raised to a more generous default with real headroom.
-    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 180
-    # [I1.10 live finding] a bounded retry on timeout/connection error is a
-    # better mitigation than an ever-larger timeout alone — see
-    # RemoteAPIPaddleOCRVLClient._post docstring for the "cold start after
-    # idle-unload" scenario this specifically addresses.
-    PADDLE_OCR_VL_MAX_RETRIES: int = 2
+    # [I1.10 live finding, confirmed with real 286-page corpus] 60s then
+    # 180s (earlier revisions of this default) both proved too short — a
+    # subset of real cascade tasks (electrical diagrams/complex tables,
+    # under the ~5.96-5.98GB VRAM pressure documented in
+    # paddleocr-vl-service/README.md) genuinely take longer than 180s to
+    # generate, CONFIRMED via GPU utilization at 100% throughout (real
+    # computation, not a hang) and via a live run at 420s/0-retries where
+    # the full paddle_cascade stage for all 286 pages completed
+    # successfully. 420s is therefore the evidence-based default, not a
+    # guess — see docs/i1.10-e2e-findings.md for the full investigation
+    # (including the ruled-out hypothesis that this was purely an
+    # event-loop-blocking artifact — that WAS a real, separate bug, fixed
+    # in paddleocr-vl-service, but did not by itself explain requests this
+    # slow).
+    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 420
+    # [I1.10 live finding, revised] a bounded retry on timeout/connection
+    # error is a better mitigation than an ever-larger timeout alone for
+    # genuine transient failures (e.g. a "cold start after idle-unload" —
+    # see RemoteAPIPaddleOCRVLClient._post docstring). Lowered from 2 to 1:
+    # now that PADDLE_OCR_VL_TIMEOUT_SECONDS=420 already accounts for
+    # genuinely-slow-but-working requests (confirmed via 100% GPU
+    # utilization throughout, not a hang), a *second* full-length retry on
+    # top of that mostly just multiplies worst-case per-element wait time
+    # (up to 3x420s=21min with the old default) without addressing a
+    # different failure mode than the first retry already covers.
+    PADDLE_OCR_VL_MAX_RETRIES: int = 1
 
     # ---- Vector Store abstraction, see
     # Documentation/system-design/04-provider-abstractions.md Bagian D and

@@ -321,12 +321,12 @@ def test_remote_client_transport_error_raises_after_exhausting_retries() -> None
 
     client = _mock_client(handler)
     with pytest.raises(
-        pv.PaddleOCRVLRemoteError, match="failed after 3 attempt\\(s\\)"
+        pv.PaddleOCRVLRemoteError, match="failed after 2 attempt\\(s\\)"
     ):
         client.describe_figure(b"png-bytes")
 
-    # 1 initial attempt + PADDLE_OCR_VL_MAX_RETRIES (default 2) retries.
-    assert calls["count"] == 3
+    # 1 initial attempt + PADDLE_OCR_VL_MAX_RETRIES (default 1) retry.
+    assert calls["count"] == 2
 
 
 def test_remote_client_recovers_after_transient_timeout() -> None:

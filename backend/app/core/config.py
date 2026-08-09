@@ -76,6 +76,26 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = True
     DB_SSL_MODE: str = "prefer"
 
+    # ---- LLM provider abstraction, see
+    # Documentation/system-design/04-provider-abstractions.md Bagian A.
+    # Two structurally-identical slots (chat model vs eval judge model) so
+    # LLM-as-judge can use a different provider than the chat model. ----
+    CHAT_LLM_PROVIDER: Literal["anthropic", "google", "openai", "local"] = "anthropic"
+    CHAT_LLM_MODEL: str = "claude-sonnet-4-5-20250929"
+    CHAT_LLM_API_KEY: str | None = None
+    CHAT_LLM_BASE_URL: str | None = None
+    CHAT_LLM_TEMPERATURE: float = 0.1
+    CHAT_LLM_MAX_TOKENS: int = 4096
+    CHAT_LLM_TIMEOUT_SECONDS: int = 25
+
+    EVAL_JUDGE_LLM_PROVIDER: Literal["anthropic", "google", "openai", "local"] = "google"
+    EVAL_JUDGE_LLM_MODEL: str = "gemini-2.5-pro"
+    EVAL_JUDGE_LLM_API_KEY: str | None = None
+    EVAL_JUDGE_LLM_BASE_URL: str | None = None
+    EVAL_JUDGE_LLM_TEMPERATURE: float = 0.0
+    EVAL_JUDGE_LLM_MAX_TOKENS: int = 4096
+    EVAL_JUDGE_LLM_TIMEOUT_SECONDS: int = 60
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

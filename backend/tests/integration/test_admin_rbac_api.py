@@ -22,11 +22,13 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 def test_list_roles_requires_admin_rbac_read_scope(auth_client) -> None:
     unauthorized = auth_client.get("/api/v1/admin/rbac/roles")
-    assert unauthorized.status_code == 401
+    assert unauthorized.status_code == 401  # no token at all -> stage-1 AUTHENTICATION
 
     user_token = _login(auth_client, USER_EMAIL, USER_PASSWORD)
     forbidden = auth_client.get("/api/v1/admin/rbac/roles", headers=_auth_headers(user_token))
-    assert forbidden.status_code == 401  # missing scope -> 401 per get_current_user design
+    # Valid token, missing scope -> stage-2 AUTHORIZATION -> 403 (F-8,
+    # Documentation/qa-reports/phase-0-qa-report.md).
+    assert forbidden.status_code == 403
 
 
 def test_list_roles_as_admin(auth_client) -> None:
@@ -112,7 +114,7 @@ def test_update_role_scopes_requires_write_scope(auth_client) -> None:
         json={"scope_codes": ["chat:read"]},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_update_role_scopes_unknown_code_returns_400(auth_client) -> None:

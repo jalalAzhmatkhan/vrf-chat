@@ -1,0 +1,113 @@
+/* Button — Documentation/ui-ux-design/01-design-system.md §7.1 */
+
+.base {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-family: var(--font-family-sans);
+  font-weight: var(--font-weight-medium);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    transform var(--duration-instant) var(--ease-standard);
+}
+
+.base:active:not(:disabled):not([aria-busy='true']) {
+  transform: scale(0.97);
+}
+
+.base:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: 2px;
+}
+
+.base:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.base[aria-busy='true'] {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Sizes */
+.sm {
+  height: 32px;
+  padding: 6px 12px;
+  font-size: var(--font-size-sm);
+}
+
+.md {
+  height: 40px;
+  padding: 10px 16px;
+  font-size: var(--font-size-base);
+}
+
+.lg {
+  height: 48px;
+  padding: 12px 20px;
+  font-size: var(--font-size-md);
+}
+
+.icon.sm {
+  width: 32px;
+  padding: 0;
+}
+.icon.md {
+  width: 40px;
+  padding: 0;
+}
+.icon.lg {
+  width: 48px;
+  padding: 0;
+}
+
+/* Variants */
+.primary {
+  background: var(--color-accent-cyan);
+  color: var(--color-text-inverse);
+}
+.primary:hover:not(:disabled):not([aria-busy='true']) {
+  filter: brightness(1.08);
+  box-shadow: var(--glow-accent-cyan);
+}
+
+.secondary {
+  background: transparent;
+  color: var(--color-text-primary);
+  border-color: var(--color-border-default);
+}
+.secondary:hover:not(:disabled):not([aria-busy='true']) {
+  border-color: var(--color-accent-cyan);
+  color: var(--color-accent-cyan);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.tertiary {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+.tertiary:hover:not(:disabled):not([aria-busy='true']) {
+  color: var(--color-accent-cyan);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.destructive {
+  background: var(--color-danger);
+  color: var(--color-text-inverse);
+}
+.destructive:hover:not(:disabled):not([aria-busy='true']) {
+  filter: brightness(1.08);
+  box-shadow: var(--glow-danger);
+}
+
+.label {
+  white-space: nowrap;
+}

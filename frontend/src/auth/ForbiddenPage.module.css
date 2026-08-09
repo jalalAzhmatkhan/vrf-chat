@@ -1,0 +1,21 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  min-height: 60vh;
+  text-align: center;
+  padding: var(--space-8);
+}
+
+.icon {
+  font-size: var(--font-size-3xl);
+  color: var(--color-text-tertiary);
+}
+
+.message {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  max-width: 420px;
+}

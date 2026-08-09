@@ -1,0 +1,86 @@
+/* Input — Documentation/ui-ux-design/01-design-system.md §7.2 */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.inputWrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input {
+  width: 100%;
+  height: 40px;
+  padding: 10px 14px;
+  background: var(--color-bg-surface-sunken);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.input.mono {
+  font-family: var(--font-family-mono);
+}
+
+.input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--color-accent-cyan);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
+}
+
+.input:disabled {
+  background: var(--color-bg-surface);
+  border-color: var(--color-border-subtle);
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.field.hasError .input {
+  border-color: var(--color-danger);
+}
+
+.field.hasError .input:focus {
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
+}
+
+.trailingSlot {
+  position: absolute;
+  right: 8px;
+  display: inline-flex;
+}
+
+.helperText {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+.errorText {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-danger);
+}

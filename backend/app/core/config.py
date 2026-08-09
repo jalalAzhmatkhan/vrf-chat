@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     # be GPU-resident simultaneously. See 02-ingestion-pipeline.md §4.
     DOCLING_UNLOAD_BEFORE_PADDLE_STAGE: bool = True
 
+    # ---- Ingestion Stage 3 — deterministic cascade trigger rules, see
+    # Documentation/system-design/02-ingestion-pipeline.md §3 and
+    # app/ingestion/cascade_trigger.py. Starting-point values per design doc
+    # §3 — WAJIB dikalibrasi ulang via I1.6 benchmark before full-volume
+    # ingestion. ----
+    THRESHOLD_TABLE: float = 0.75
+    THRESHOLD_TEXT: float = 0.6
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

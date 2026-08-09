@@ -1,5 +1,5 @@
 import { useLocation } from 'react-router-dom';
-import { useAuth } from './AuthContext';
+import { useAuth } from './useAuth';
 import { flattenRouteRequirements, hasRequiredScopes } from './filterNavByScopes';
 import { ForbiddenPage } from './ForbiddenPage';
 

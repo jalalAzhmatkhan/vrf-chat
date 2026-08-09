@@ -25,6 +25,19 @@ def test_allowed_origins_splits_comma_separated_string() -> None:
     assert settings.ALLOWED_ORIGINS == ["http://a", "http://b"]
 
 
+def test_allowed_origins_from_real_os_environ_variable(monkeypatch) -> None:
+    """Regression test: pydantic-settings attempts JSON-decoding env values
+    for list-typed fields by default, which fails for a plain
+    comma-separated string coming from a real OS env var / docker-compose
+    `environment:` block (as opposed to a Python kwarg in tests, which
+    bypasses that source entirely) unless the field is marked `NoDecode`."""
+    monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:5173,http://example.com")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.ALLOWED_ORIGINS == ["http://localhost:5173", "http://example.com"]
+
+
 def test_get_settings_is_cached() -> None:
     get_settings.cache_clear()
 
@@ -33,20 +46,6 @@ def test_get_settings_is_cached() -> None:
 
     assert first is second
     get_settings.cache_clear()
-
-
-def test_allowed_origins_from_real_os_environ_variable(monkeypatch) -> None:
-    """Regression test: pydantic-settings attempts JSON-decoding env values
-    for list-typed fields by default, which fails for a plain
-    comma-separated string coming from a real OS env var / docker-compose
-    `environment:` block (as opposed to a Python kwarg in tests, which
-    bypasses that source entirely) unless the field is marked `NoDecode`.
-    See Documentation/qa-reports/phase-0-qa-report.md F-1."""
-    monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:5173,http://example.com")
-
-    settings = Settings(_env_file=None)
-
-    assert settings.ALLOWED_ORIGINS == ["http://localhost:5173", "http://example.com"]
 
 
 def test_otel_endpoint_blank_string_from_real_env_var_becomes_none(monkeypatch) -> None:
@@ -75,3 +74,15 @@ def test_settings_constructs_from_shipped_env_example() -> None:
 
     assert settings.ALLOWED_ORIGINS == ["http://localhost:5173"]
     assert settings.OTEL_EXPORTER_OTLP_ENDPOINT is None
+
+
+def test_redis_url_without_password() -> None:
+    settings = Settings(_env_file=None, REDIS_HOST="redis", REDIS_PORT=6379, REDIS_DB=2)
+
+    assert settings.redis_url == "redis://redis:6379/2"
+
+
+def test_redis_url_with_password() -> None:
+    settings = Settings(_env_file=None, REDIS_HOST="redis", REDIS_PASSWORD="secret")
+
+    assert settings.redis_url == "redis://:secret@redis:6379/0"

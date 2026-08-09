@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     # relevant when OBJECT_STORAGE_BACKEND=local.
     OBJECT_STORAGE_LOCAL_TOKEN_SECRET: str = "dev-only-insecure-local-storage-token-secret"
 
+    # ---- Redis (Celery broker + cache), see
+    # Documentation/system-design/01-architecture-overview.md §2/§6 ----
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: str | None = None
+
+    # ---- Celery ----
+    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    CELERY_GPU_QUEUE: str = "gpu"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:
@@ -133,6 +144,13 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @property
+    def redis_url(self) -> str:
+        """Build the Redis connection URL used by both Celery and the
+        `/auth/login` rate limiter (see 08-authentication-rbac.md §5)."""
+        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
 
 @lru_cache

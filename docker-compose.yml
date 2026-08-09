@@ -1,0 +1,207 @@
+# vrf-chat — Docker Compose skeleton (Fase 0 / B0.5)
+#
+# WAJIB dijalankan dari shell WSL, TIDAK PERNAH dari Windows native
+# (PowerShell/CMD) — lihat CLAUDE.md §5 & Documentation/system-design/
+# 01-architecture-overview.md §6.
+#
+# Usage (from WSL):
+#   docker compose up --build                      # core services only
+#   docker compose --profile gpu up --build         # + backend-worker-gpu
+#   docker compose --profile kg up --build           # + neo4j (Fase 3, off by default)
+#
+# Ownership note: this file lives outside vrf-chat/backend/ — Backend
+# Engineer writes it as a one-time, explicitly-authorized exception (more
+# services live here than in frontend/), per Jalal's direct instruction.
+# Frontend service section below was written from Frontend Engineer's
+# actual frontend/Dockerfile (multi-stage build -> nginx:80) — see the
+# DIRECT MESSAGE -> Frontend Engineer in the corresponding STATUS REPORT
+# for confirmation/any correction needed.
+#
+# All HOST-side published ports are overridable via env vars (defaults
+# below match convention) so this stack can run alongside other projects'
+# containers on a shared dev machine without port clashes, e.g.:
+#   POSTGRES_HOST_PORT=15432 MINIO_HOST_PORT=19000 docker compose up
+
+name: vrf-chat
+
+# Single source of truth for the container-network-specific env overrides
+# shared by backend-api/backend-worker/backend-worker-gpu — everything else
+# (API keys, FIRST_SUPERUSER_*, etc.) comes from backend/.env via env_file.
+# Previously these were three separately-typed-out blocks that silently
+# drifted (see Documentation/qa-reports/phase-0-qa-report.md F-2:
+# DB_PASSWORD was overridden here for none of the three, while DB_HOST/
+# REDIS_HOST/OBJECT_STORAGE_* were — this YAML anchor makes that class of
+# bug structurally impossible going forward, since there is now only one
+# place to edit).
+x-backend-env-overrides: &backend-env-overrides
+  DB_HOST: postgres
+  DB_PASSWORD: vrf_app_dev_password # MUST match postgres service's POSTGRES_PASSWORD below
+  REDIS_HOST: redis
+  OBJECT_STORAGE_BACKEND: minio
+  OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+  OBJECT_STORAGE_ACCESS_KEY: minioadmin
+  OBJECT_STORAGE_SECRET_KEY: minioadmin
+
+services:
+  backend-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: api
+    env_file:
+      - ./backend/.env
+    environment:
+      <<: *backend-env-overrides
+      ALLOWED_ORIGINS: http://localhost:5173
+    ports:
+      - "${BACKEND_API_HOST_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      qdrant:
+        condition: service_started
+    networks: [vrf-net]
+
+  backend-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: worker
+    env_file:
+      - ./backend/.env
+    environment:
+      <<: *backend-env-overrides
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks: [vrf-net]
+
+  # GPU-bound ingestion queue (Docling GPU + PaddleOCR-VL cascade,
+  # 02-ingestion-pipeline.md §4). concurrency=1 baked into the image CMD —
+  # RTX 3060 6GB VRAM does not fit both models resident simultaneously.
+  # Off by default: `docker compose --profile gpu up`.
+  backend-worker-gpu:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: worker-gpu
+    profiles: ["gpu"]
+    env_file:
+      - ./backend/.env
+    environment:
+      <<: *backend-env-overrides
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    networks: [vrf-net]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis-data:/data
+    networks: [vrf-net]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vrf_app
+      POSTGRES_PASSWORD: vrf_app_dev_password
+      POSTGRES_DB: vrf_chatbot
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vrf_app -d vrf_chatbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [vrf-net]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "${QDRANT_HTTP_HOST_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_HOST_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks: [vrf-net]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "${MINIO_API_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks: [vrf-net]
+
+  # Fase 3 (knowledge graph) — not started by default, per
+  # 01-architecture-overview.md §6: `docker compose --profile kg up`.
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["kg"]
+    environment:
+      NEO4J_AUTH: neo4j/change-me-neo4j-dev-password
+    ports:
+      - "${NEO4J_HTTP_HOST_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_HOST_PORT:-7687}:7687"
+    volumes:
+      - neo4j-data:/data
+    networks: [vrf-net]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Vite inlines VITE_-prefixed vars at BUILD time (see
+        # frontend/Dockerfile comment) — this must be a URL reachable from
+        # the END USER'S BROWSER, not container-to-container, hence
+        # "localhost:<published backend-api port>" rather than
+        # "http://backend-api:8000". Keep in sync with BACKEND_API_HOST_PORT
+        # above if overridden.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+    ports:
+      - "${FRONTEND_HOST_PORT:-5173}:80"
+    depends_on:
+      - backend-api
+    networks: [vrf-net]
+
+networks:
+  vrf-net:
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  minio-data:
+  neo4j-data:

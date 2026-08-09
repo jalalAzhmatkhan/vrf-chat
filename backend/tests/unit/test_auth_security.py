@@ -51,12 +51,17 @@ async def test_get_current_user_invalid_token_raises_401() -> None:
     assert exc_info.value.status_code == 401
 
 
-async def test_get_current_user_missing_scope_raises_401() -> None:
+async def test_get_current_user_missing_scope_raises_403() -> None:
+    """F-8 (Documentation/qa-reports/phase-0-qa-report.md): a valid token
+    that merely lacks a required scope is a stage-2 AUTHORIZATION failure
+    (403), not a stage-1 AUTHENTICATION failure (401)."""
     settings = _settings()
     token = create_access_token(user_id=1, role="user", scopes=["chat:read"], settings=settings)
 
     with pytest.raises(HTTPException) as exc_info:
         await get_current_user(SecurityScopes(["admin:rbac:write"]), token, settings)
 
-    assert exc_info.value.status_code == 401
+    assert exc_info.value.status_code == 403
     assert "admin:rbac:write" in exc_info.value.detail
+    assert exc_info.value.headers is not None
+    assert 'error="insufficient_scope"' in exc_info.value.headers["WWW-Authenticate"]

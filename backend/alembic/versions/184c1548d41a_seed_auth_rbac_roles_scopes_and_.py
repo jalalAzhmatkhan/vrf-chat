@@ -184,10 +184,50 @@ def upgrade() -> None:
     _bootstrap_first_superuser(conn, role_ids["admin"])
 
 
+class DowngradeBlockedByExistingUsersError(RuntimeError):
+    """Raised when `downgrade()` is asked to remove seed roles/scopes that
+    real `users` rows still reference. See F-5,
+    Documentation/qa-reports/phase-0-qa-report.md."""
+
+
 def downgrade() -> None:
     conn = op.get_bind()
+
+    seed_role_ids = [
+        row[0]
+        for row in conn.execute(
+            sa.select(roles_table.c.id).where(roles_table.c.name.in_(["admin", "user"]))
+        )
+    ]
+
+    # This migration deliberately never deletes `users` on downgrade (must
+    # not silently delete real admin accounts created after bootstrap) — but
+    # that means deleting the `admin`/`user` roles themselves is only safe
+    # when NO user row still references them. Checking this upfront (instead
+    # of just attempting the DELETE and letting Postgres raise a raw FK
+    # violation, which is what happened before this fix — see F-5) means we
+    # fail with a clear, actionable message *before* touching any data, and
+    # leave role_scopes/scopes/roles fully intact rather than partially
+    # torn down (partially removing scopes/role_scopes while leaving
+    # roles+users in place would be worse: existing users would keep their
+    # role_id but lose every scope, breaking auth entirely for them).
+    if seed_role_ids:
+        blocking_user_count = conn.execute(
+            sa.select(sa.func.count())
+            .select_from(users_table)
+            .where(users_table.c.role_id.in_(seed_role_ids))
+        ).scalar_one()
+        if blocking_user_count:
+            raise DowngradeBlockedByExistingUsersError(
+                f"Cannot downgrade {revision}: {blocking_user_count} user(s) still "
+                "reference the seeded 'admin'/'user' roles (e.g. the bootstrapped "
+                "first superuser). Deleting those roles would either violate the "
+                "users.role_id foreign key, or (if users were deleted first) "
+                "silently destroy real account data — neither is safe to do "
+                "automatically. Manually reassign/delete the blocking user(s) "
+                "first if you really need to downgrade past this migration."
+            )
+
     conn.execute(sa.delete(role_scopes_table))
     conn.execute(sa.delete(scopes_table))
-    # Deliberately NOT deleting `users` here — downgrading this migration
-    # must not silently delete real admin accounts created after bootstrap.
     conn.execute(sa.delete(roles_table).where(roles_table.c.name.in_(["admin", "user"])))

@@ -40,6 +40,13 @@ uv run alembic downgrade base      # roll back everything (dev/testing only)
 uv run alembic revision --autogenerate -m "description"   # new migration
 ```
 
+**Note**: `184c1548d41a`'s `downgrade()` refuses (with a clear error, not a
+raw FK violation) to remove the seeded `admin`/`user` roles while any `users`
+row still references them (e.g. the bootstrapped first superuser) — deleting
+those roles while users still reference them isn't safe automatically.
+Manually reassign/delete the blocking user(s) first if you really need to
+downgrade past this migration.
+
 The connection URL is built from `DB_ENGINE`/`DB_HOST`/... in `.env` (see
 `app/db/engine.py` and `alembic/env.py`) — `alembic.ini`'s `sqlalchemy.url` is
 intentionally left blank.
@@ -62,6 +69,15 @@ the *same* migration (see `08-authentication-rbac.md` §3.4 — admin access is
 enforced via explicit, auditable `role_scopes` rows, never a hardcoded
 `if role == "admin"` bypass).
 
+As a secondary safety net for that convention, `scripts/sync_admin_scopes.py`
+idempotently assigns any `scopes` row not yet present in the `admin` role's
+`role_scopes` mapping (safe to run repeatedly; run manually or wire into
+CI/deploy):
+
+```bash
+uv run python scripts/sync_admin_scopes.py
+```
+
 ## Tests
 
 ```bash
@@ -74,7 +90,7 @@ Coverage is enforced at 100% (`--cov-fail-under=100`, see `pyproject.toml`).
 
 ```bash
 uv run ruff check .
-uv run mypy app
+uv run mypy app scripts
 ```
 
 ## Docker (via WSL only — see repo root `CLAUDE.md` §5)

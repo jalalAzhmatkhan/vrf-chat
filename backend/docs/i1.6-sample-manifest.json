@@ -1,0 +1,499 @@
+{
+  "categories": {
+    "text_normal": [
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 8,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 9,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 8,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 9,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 2,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 14,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 3,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 2,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 4,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV III Service Manual RXYQ REYQ.pdf",
+        "page_number": 2,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 22,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV III Service Manual RXYQ REYQ.pdf",
+        "page_number": 3,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 3,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV III Service Manual RXYQ REYQ.pdf",
+        "page_number": 4,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 2,
+        "embedded_image_count": 0
+      }
+    ],
+    "table": [
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 5,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 38,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 7,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 42,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 10,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 4,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 7,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 48,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 10,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 4,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 12,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 22,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 33,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 28,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 35,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 29,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 37,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 35,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV III Service Manual RXYQ REYQ.pdf",
+        "page_number": 22,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 49,
+        "embedded_image_count": 0
+      }
+    ],
+    "electrical_diagram": [
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 37,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 536,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 39,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 544,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 41,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 490,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 1,
+        "flags": [
+          "low_text_confidence",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 540,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 2,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 362,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 3,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 382,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 1,
+        "flags": [
+          "low_text_confidence",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 449,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 41,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 509,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 43,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 434,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 44,
+        "flags": [
+          "low_text_confidence",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 345,
+        "embedded_image_count": 0
+      }
+    ],
+    "screenshot_ui": [
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 16,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 18,
+        "embedded_image_count": 14
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 17,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 6,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 19,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 6,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 16,
+        "flags": [
+          "text_normal",
+          "vector_diagram",
+          "raster_image"
+        ],
+        "vector_drawing_count": 290,
+        "embedded_image_count": 30
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 19,
+        "flags": [
+          "text_normal",
+          "vector_diagram",
+          "raster_image"
+        ],
+        "vector_drawing_count": 276,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 21,
+        "flags": [
+          "text_normal",
+          "vector_diagram",
+          "raster_image"
+        ],
+        "vector_drawing_count": 274,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 16,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 21,
+        "embedded_image_count": 30
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 19,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 8,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 21,
+        "flags": [
+          "text_normal",
+          "raster_image"
+        ],
+        "vector_drawing_count": 6,
+        "embedded_image_count": 2
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 1,
+        "flags": [
+          "low_text_confidence",
+          "raster_image"
+        ],
+        "vector_drawing_count": 35,
+        "embedded_image_count": 1
+      }
+    ],
+    "troubleshooting": [
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 178,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 28,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 183,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 24,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric  SH_PURY-P72_288(T)(Y)(S)KMU-A_HWE1116F Service Handbook.pdf",
+        "page_number": 208,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 52,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 132,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 306,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 138,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 292,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUCY-P_EP_YKD_YSKD Service Handbook.pdf",
+        "page_number": 181,
+        "flags": [
+          "text_normal",
+          "vector_diagram"
+        ],
+        "vector_drawing_count": 309,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 140,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 37,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 146,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 29,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Mitsubishi Electric PUHY-P_YKB-A1 Service Handbook.pdf",
+        "page_number": 178,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 46,
+        "embedded_image_count": 0
+      },
+      {
+        "document": "Zeggo VRV A Service Manual (RXQ).pdf",
+        "page_number": 93,
+        "flags": [
+          "text_normal"
+        ],
+        "vector_drawing_count": 2,
+        "embedded_image_count": 0
+      }
+    ]
+  },
+  "counts": {
+    "text_normal": 10,
+    "table": 10,
+    "electrical_diagram": 10,
+    "screenshot_ui": 10,
+    "troubleshooting": 10
+  },
+  "total": 50
+}

@@ -96,6 +96,23 @@ class Settings(BaseSettings):
     EVAL_JUDGE_LLM_MAX_TOKENS: int = 4096
     EVAL_JUDGE_LLM_TIMEOUT_SECONDS: int = 60
 
+    # ---- Object storage abstraction, see
+    # Documentation/system-design/04-provider-abstractions.md Bagian B. ----
+    OBJECT_STORAGE_BACKEND: Literal["minio", "s3", "local"] = "minio"
+    OBJECT_STORAGE_BUCKET: str = "vrf-manuals"
+    OBJECT_STORAGE_REGION: str = "us-east-1"
+    OBJECT_STORAGE_ACCESS_KEY: str | None = None
+    OBJECT_STORAGE_SECRET_KEY: str | None = None
+    OBJECT_STORAGE_ENDPOINT_URL: str | None = None
+    OBJECT_STORAGE_USE_SSL: bool = False
+    OBJECT_STORAGE_FORCE_PATH_STYLE: bool = True
+    OBJECT_STORAGE_LOCAL_BASE_PATH: str = "./data/object-storage"
+    OBJECT_STORAGE_PRESIGNED_URL_EXPIRY_SECONDS: int = 3600
+    # HMAC secret used to sign the emulated "presigned" tokens issued by the
+    # local filesystem adapter (see app/storage/local_adapter.py). Only
+    # relevant when OBJECT_STORAGE_BACKEND=local.
+    OBJECT_STORAGE_LOCAL_TOKEN_SECRET: str = "dev-only-insecure-local-storage-token-secret"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

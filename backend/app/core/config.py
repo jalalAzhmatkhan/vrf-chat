@@ -61,6 +61,21 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: str | None = None
     FIRST_SUPERUSER_PASSWORD: str | None = None
 
+    # ---- Database engine abstraction (Postgres <-> MySQL), see
+    # Documentation/system-design/04-provider-abstractions.md Bagian C ----
+    DB_ENGINE: Literal["postgresql", "mysql"] = "postgresql"
+    DB_HOST: str = "localhost"
+    DB_PORT: int = 5432
+    DB_NAME: str = "vrf_chatbot"
+    DB_USER: str = "vrf_app"
+    DB_PASSWORD: str = ""
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_RECYCLE: int = 1800
+    DB_POOL_PRE_PING: bool = True
+    DB_SSL_MODE: str = "prefer"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

@@ -28,6 +28,22 @@ uv run uvicorn app.main:app --reload
 
 `GET /api/v1/health` should respond `{"status": "ok"}`.
 
+## Database migrations (Alembic)
+
+All schema changes — including seed/data migrations (roles, scopes, admin
+bootstrap) — go through Alembic. Never call `Base.metadata.create_all()`
+against a real database.
+
+```bash
+uv run alembic upgrade head        # apply all migrations
+uv run alembic downgrade base      # roll back everything (dev/testing only)
+uv run alembic revision --autogenerate -m "description"   # new migration
+```
+
+The connection URL is built from `DB_ENGINE`/`DB_HOST`/... in `.env` (see
+`app/db/engine.py` and `alembic/env.py`) — `alembic.ini`'s `sqlalchemy.url` is
+intentionally left blank.
+
 ## Tests
 
 ```bash

@@ -15,10 +15,10 @@ application-level settings needed for the FastAPI scaffold + health check.
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AnyHttpUrl, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -39,7 +39,13 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
 
     # CORS — single-tenant app, explicit allow-list required (never wildcard).
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:5173"]
+    # `NoDecode`: disables pydantic-settings' default JSON-decode-then-validate
+    # for complex (list) env values, so a plain comma-separated string from a
+    # real `.env`/env var (as opposed to a Python kwarg in tests, which
+    # bypasses that source entirely) is handled by `_split_allowed_origins`
+    # below instead of failing JSON parsing first — see
+    # Documentation/qa-reports/phase-0-qa-report.md F-1.
+    ALLOWED_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:5173"]
 
     # OpenTelemetry-compatible tracing (see app/core/observability.py). Left
     # unset by default -> tracing spans are created but exported nowhere
@@ -63,6 +69,17 @@ class Settings(BaseSettings):
         a native list, since dotenv values are always strings."""
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("OTEL_EXPORTER_OTLP_ENDPOINT", mode="before")
+    @classmethod
+    def _blank_otel_endpoint_to_none(cls, value: object) -> object:
+        """Treat an empty string (what `.env.example` ships,
+        ``OTEL_EXPORTER_OTLP_ENDPOINT=``) as unset, rather than an invalid
+        URL — Pydantic's ``AnyHttpUrl`` does not treat ``""`` as ``None`` on
+        its own. See Documentation/qa-reports/phase-0-qa-report.md F-1."""
+        if isinstance(value, str) and value.strip() == "":
+            return None
         return value
 
 

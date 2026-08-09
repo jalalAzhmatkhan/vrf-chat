@@ -149,6 +149,18 @@ class Settings(BaseSettings):
     NATIVE_PROBE_VECTOR_DRAWING_THRESHOLD: int = 50
     NATIVE_PROBE_TEXT_DENSITY_MIN: float = 0.0005
 
+    # ---- Ingestion Stage 2 — Docling structural parser, see
+    # Documentation/system-design/02-ingestion-pipeline.md §3-4 and
+    # app/ingestion/docling_parser.py. Only consumed by the GPU ingestion
+    # Celery task (backend-worker-gpu), never validated at API startup — see
+    # app/ingestion/docling_parser.py module docstring for rationale. ----
+    DOCLING_DEVICE: Literal["cuda", "cpu"] = "cuda"
+    DOCLING_ICON_MAX_AREA_RATIO: float = 0.02
+    DOCLING_ICON_MAX_DIM_PT: float = 80.0
+    # WAJIB true in dev (RTX 3060 6GB) — Docling and PaddleOCR-VL must never
+    # be GPU-resident simultaneously. See 02-ingestion-pipeline.md §4.
+    DOCLING_UNLOAD_BEFORE_PADDLE_STAGE: bool = True
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

@@ -24,6 +24,24 @@
 
 name: vrf-chat
 
+# Single source of truth for the container-network-specific env overrides
+# shared by backend-api/backend-worker/backend-worker-gpu — everything else
+# (API keys, FIRST_SUPERUSER_*, etc.) comes from backend/.env via env_file.
+# Previously these were three separately-typed-out blocks that silently
+# drifted (see Documentation/qa-reports/phase-0-qa-report.md F-2:
+# DB_PASSWORD was overridden here for none of the three, while DB_HOST/
+# REDIS_HOST/OBJECT_STORAGE_* were — this YAML anchor makes that class of
+# bug structurally impossible going forward, since there is now only one
+# place to edit).
+x-backend-env-overrides: &backend-env-overrides
+  DB_HOST: postgres
+  DB_PASSWORD: vrf_app_dev_password # MUST match postgres service's POSTGRES_PASSWORD below
+  REDIS_HOST: redis
+  OBJECT_STORAGE_BACKEND: minio
+  OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
+  OBJECT_STORAGE_ACCESS_KEY: minioadmin
+  OBJECT_STORAGE_SECRET_KEY: minioadmin
+
 services:
   backend-api:
     build:
@@ -33,14 +51,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      # Container-network-specific overrides — everything else (API keys,
-      # FIRST_SUPERUSER_*, etc.) comes from backend/.env via env_file above.
-      DB_HOST: postgres
-      REDIS_HOST: redis
-      OBJECT_STORAGE_BACKEND: minio
-      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
-      OBJECT_STORAGE_ACCESS_KEY: minioadmin
-      OBJECT_STORAGE_SECRET_KEY: minioadmin
+      <<: *backend-env-overrides
       ALLOWED_ORIGINS: http://localhost:5173
     ports:
       - "${BACKEND_API_HOST_PORT:-8000}:8000"
@@ -63,12 +74,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DB_HOST: postgres
-      REDIS_HOST: redis
-      OBJECT_STORAGE_BACKEND: minio
-      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
-      OBJECT_STORAGE_ACCESS_KEY: minioadmin
-      OBJECT_STORAGE_SECRET_KEY: minioadmin
+      <<: *backend-env-overrides
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,12 +97,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DB_HOST: postgres
-      REDIS_HOST: redis
-      OBJECT_STORAGE_BACKEND: minio
-      OBJECT_STORAGE_ENDPOINT_URL: http://minio:9000
-      OBJECT_STORAGE_ACCESS_KEY: minioadmin
-      OBJECT_STORAGE_SECRET_KEY: minioadmin
+      <<: *backend-env-overrides
     depends_on:
       postgres:
         condition: service_healthy

@@ -169,6 +169,23 @@ class Settings(BaseSettings):
     THRESHOLD_TABLE: float = 0.75
     THRESHOLD_TEXT: float = 0.6
 
+    # ---- Ingestion Stage 4 — PaddleOCR-VL cascade, see
+    # Documentation/system-design/02-ingestion-pipeline.md §4 and
+    # app/ingestion/paddleocr_vl_cascade.py. Only consumed by the GPU
+    # ingestion Celery task, not validated at API startup (same rationale as
+    # DOCLING_* — see docling_parser.py module docstring). ----
+    PADDLE_OCR_VL_BACKEND: Literal["local", "remote_api"] = "local"
+    PADDLE_OCR_VL_DEVICE: Literal["cuda", "cpu"] = "cuda"
+    # WAJIB fp16 in dev (RTX 3060 6GB) — bf16/fp32 only legitimate on a
+    # larger cloud GPU. See 02-ingestion-pipeline.md §4.
+    PADDLE_OCR_VL_DTYPE: Literal["fp16", "bf16", "fp32"] = "fp16"
+    # WAJIB 1 in dev, not raised without explicit benchmark data (I1.6).
+    PADDLE_OCR_VL_BATCH_SIZE: int = 1
+    PADDLE_OCR_VL_MAX_CONCURRENT_WORKERS: int = 1
+    PADDLE_OCR_VL_API_URL: str | None = None
+    PADDLE_OCR_VL_API_KEY: str | None = None
+    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 60
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

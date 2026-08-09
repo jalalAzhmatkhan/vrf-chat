@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-ai-slim[anthropic,google,openai]>=2.27.0",
     "pydantic-settings>=2",
     "pyjwt>=2.13.0",
+    "pymupdf>=1.28.2",
     "pymysql>=1.2.0",
     "python-json-logger>=4.1.0",
     "redis>=8.1.0",

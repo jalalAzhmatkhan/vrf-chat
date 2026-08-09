@@ -270,14 +270,6 @@ def store_pages_and_elements(
                     )
                     summary.figure_crops_uploaded += 1
 
-                element_candidates = kg_candidates.get(draft.local_id)
-                kg_entities = (
-                    entities_to_jsonb(element_candidates.entities) if element_candidates else []
-                )
-                kg_relations = (
-                    relations_to_jsonb(element_candidates.relations) if element_candidates else []
-                )
-
                 element_row = Element(
                     document_id=document.id,
                     page_id=new_page.id,
@@ -291,13 +283,32 @@ def store_pages_and_elements(
                     extraction_method=extraction_method,
                     extraction_confidence=draft.extraction_confidence,
                     visual_description=visual_description,
-                    kg_candidate_entities=kg_entities,
-                    kg_candidate_relations=kg_relations,
+                    kg_candidate_entities=[],
+                    kg_candidate_relations=[],
                 )
                 db.add(element_row)
                 db.flush()
                 local_id_to_db_id[draft.local_id] = element_row.id
                 summary.elements_stored += 1
+
+                # KG candidates are extracted keyed by `ElementDraft.local_id`
+                # (I1.9, app/ingestion/kg_candidate_extractor.py) — every
+                # candidate's own `element_id` field is set to that same
+                # local_id at extraction time, so it can now be rewritten to
+                # the real `elements.id` we just learned from the flush
+                # above (provenance must point at the real row, not the
+                # ingestion-time-only local_id — see 03-retrieval-chunking.md
+                # §4 element_ids -> elements.id traceability chain).
+                element_candidates = kg_candidates.get(draft.local_id)
+                if element_candidates is not None:
+                    kg_entities = entities_to_jsonb(element_candidates.entities)
+                    kg_relations = relations_to_jsonb(element_candidates.relations)
+                    for entity_dict in kg_entities:
+                        entity_dict["element_id"] = element_row.id
+                    for relation_dict in kg_relations:
+                        relation_dict["element_id"] = element_row.id
+                    element_row.kg_candidate_entities = kg_entities
+                    element_row.kg_candidate_relations = kg_relations
 
             summary.pages_stored += 1
 

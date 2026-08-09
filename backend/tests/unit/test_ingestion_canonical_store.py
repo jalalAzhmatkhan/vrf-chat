@@ -471,13 +471,17 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
     document = _basic_document(db, page_count=1)
     storage = FakeObjectStorageClient()
 
+    # local_id=7 deliberately differs from the DB id this element will get
+    # (1, the only row) — verifies `element_id` inside the stored jsonb is
+    # rewritten to the real `elements.id`, not left as the ingestion-time
+    # local_id (see canonical_store.py comment above the rewrite).
     parse_result = DoclingParseResult(
-        elements=[_element(local_id=1, text="Check TH3 near the compressor.")],
+        elements=[_element(local_id=7, text="Check TH3 near the compressor.")],
         page_confidence={1: _page_confidence(1)},
         page_count=1,
     )
     kg_candidates = {
-        1: ElementKGCandidates(
+        7: ElementKGCandidates(
             entities=[
                 KGCandidateEntity(
                     name="TH3",
@@ -485,7 +489,7 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
                     confidence=0.7,
                     source_document="manual.pdf",
                     page=1,
-                    element_id=1,
+                    element_id=7,
                 )
             ],
             relations=[
@@ -496,7 +500,7 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
                     confidence=0.5,
                     source_document="manual.pdf",
                     page=1,
-                    element_id=1,
+                    element_id=7,
                 )
             ],
         )
@@ -512,6 +516,7 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
     )
 
     element = db.execute(select(Element)).scalar_one()
+    assert element.id != 7  # sanity: local_id and real db id genuinely differ here
     assert element.kg_candidate_entities == [
         {
             "name": "TH3",
@@ -519,7 +524,7 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "confidence": 0.7,
             "source_document": "manual.pdf",
             "page": 1,
-            "element_id": 1,
+            "element_id": element.id,
         }
     ]
     assert element.kg_candidate_relations == [
@@ -530,7 +535,7 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "confidence": 0.5,
             "source_document": "manual.pdf",
             "page": 1,
-            "element_id": 1,
+            "element_id": element.id,
         }
     ]
 

@@ -83,6 +83,19 @@ layers 1-2) can plausibly push this over budget and trigger an out-of-memory
 crash mid-ingestion. This is **not hypothetical** — it is the realistic
 day-to-day operating margin of this service on the target dev hardware.
 
+**Update — full 286-page corpus run completed without OOM**: a real
+end-to-end run against the full Zeggo VRV IV REYQ document (386 real
+`describe_figure`/`reparse_table` calls across the whole corpus, not just
+one sample image) completed successfully with no OOM crash — see
+`backend/docs/i1.10-e2e-findings.md`. This is reassuring operational
+evidence (the risk did not materialize across a real, varied, full-corpus
+workload), but does **not** retract the risk assessment above — 386
+successful calls in a row is not proof against the ~150-220MB margin ever
+being exceeded, especially by content not represented in this one manual
+(other 6 source documents, larger/denser diagrams, etc.). Treat this as
+"the risk is real and should be monitored," not "the risk didn't
+materialize so it can be ignored."
+
 ### VRAM reduction investigated (I1.10), honest result: no further reduction found
 
 Per explicit instruction to investigate before accepting this risk as final:
@@ -113,11 +126,17 @@ out OOM entirely.
 
 ### Not yet verified
 
-- Multiple concurrent/sequential inference calls in a long-running service
-  process under real production-like load (the live tests were one-shot
-  scripts + a handful of manual requests during I1.10, not sustained load)
-  — recommended as an operational check during Q1.2 (QA Engineer's
-  WSL/Docker GPU verification).
+- ~~Multiple concurrent/sequential inference calls in a long-running service
+  process under real production-like load~~ — **now verified**: 386
+  sequential real inference calls across the full 286-page Zeggo VRV IV
+  REYQ corpus completed successfully in one long-running service process
+  (see "Update" note above). *Concurrent* (simultaneous, not sequential)
+  request handling is still only verified at the level of "the event loop
+  stays responsive" (§ event loop fix above), not "two inference requests
+  submitted at the same instant both complete correctly" — the internal
+  `RLock` serializes them by design (§ `app/pipeline.py`
+  `PaddleOCRVLPipeline` docstring), so this is expected/intentional
+  behavior, not an untested gap, but worth stating explicitly.
 - The full Docker image build (`docker build` of this service's
   `Dockerfile`) — dependency resolution was verified via `uv sync` in a
   WSL-native venv (same rationale as I1.6's Docling verification: identical

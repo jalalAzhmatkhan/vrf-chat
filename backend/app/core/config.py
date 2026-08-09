@@ -184,7 +184,17 @@ class Settings(BaseSettings):
     PADDLE_OCR_VL_MAX_CONCURRENT_WORKERS: int = 1
     PADDLE_OCR_VL_API_URL: str | None = None
     PADDLE_OCR_VL_API_KEY: str | None = None
-    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 60
+    # [I1.10 live finding] 60s (the original starting-point default) was too
+    # short — real single-image PaddleOCR-VL inference (paddleocr-vl-service,
+    # 0.9B-parameter VLM, RTX 3060 6GB) observed taking 30-60+s, occasionally
+    # tripping httpx's ReadTimeout during the 286-page Zeggo VRV IV REYQ E2E
+    # proof run. Raised to a more generous default with real headroom.
+    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 180
+    # [I1.10 live finding] a bounded retry on timeout/connection error is a
+    # better mitigation than an ever-larger timeout alone — see
+    # RemoteAPIPaddleOCRVLClient._post docstring for the "cold start after
+    # idle-unload" scenario this specifically addresses.
+    PADDLE_OCR_VL_MAX_RETRIES: int = 2
 
     # ---- Vector Store abstraction, see
     # Documentation/system-design/04-provider-abstractions.md Bagian D and

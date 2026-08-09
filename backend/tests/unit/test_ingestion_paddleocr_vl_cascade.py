@@ -312,13 +312,40 @@ def test_remote_client_http_error_status_raises() -> None:
         client.describe_figure(b"png-bytes")
 
 
-def test_remote_client_transport_error_raises() -> None:
+def test_remote_client_transport_error_raises_after_exhausting_retries() -> None:
+    calls = {"count": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
         raise httpx.ConnectError("connection refused", request=request)
 
     client = _mock_client(handler)
-    with pytest.raises(pv.PaddleOCRVLRemoteError, match="request to describe_figure failed"):
+    with pytest.raises(
+        pv.PaddleOCRVLRemoteError, match="failed after 3 attempt\\(s\\)"
+    ):
         client.describe_figure(b"png-bytes")
+
+    # 1 initial attempt + PADDLE_OCR_VL_MAX_RETRIES (default 2) retries.
+    assert calls["count"] == 3
+
+
+def test_remote_client_recovers_after_transient_timeout() -> None:
+    """[I1.10 live finding] a request that times out once (e.g. the service
+    was mid idle-unload-then-reload) should succeed on retry rather than
+    failing the whole cascade task outright."""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] < 2:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(200, json={"text": "recovered"})
+
+    client = _mock_client(handler)
+    result = client.ocr_page(b"png-bytes")
+
+    assert result.text == "recovered"
+    assert calls["count"] == 2
 
 
 def test_remote_client_unload_closes_http_client() -> None:

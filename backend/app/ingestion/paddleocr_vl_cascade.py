@@ -349,18 +349,38 @@ class RemoteAPIPaddleOCRVLClient:
             timeout=settings.PADDLE_OCR_VL_TIMEOUT_SECONDS,
             transport=transport,
         )
+        self._max_retries = settings.PADDLE_OCR_VL_MAX_RETRIES
 
     def _post(self, endpoint: str, image_png: bytes) -> dict[str, Any]:
+        # [I1.10 live finding, 286-page Zeggo VRV IV REYQ E2E run] Real
+        # single-image inference latency is highly variable — a request
+        # landing right as paddleocr-vl-service's idle-unload kicks in pays
+        # a "cold start" (model reload + inference) that can exceed even a
+        # generous timeout, while the *same* image on a warm model is much
+        # faster. A bounded retry (not just a larger timeout alone) is the
+        # right mitigation: one retry after a timeout gives the service a
+        # chance to finish warming up rather than repeating the same
+        # request-vs-model-load race.
         payload = {"image_base64": base64.b64encode(image_png).decode("ascii")}
-        try:
-            response = self._client.post(f"/{endpoint}", json=payload)
-        except httpx.HTTPError as exc:
-            raise PaddleOCRVLRemoteError(f"request to {endpoint} failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise PaddleOCRVLRemoteError(
-                f"{endpoint} returned HTTP {response.status_code}: {response.text[:500]}"
-            )
-        return response.json()
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._client.post(f"/{endpoint}", json=payload)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                logger.warning(
+                    "paddleocr_vl_cascade.remote_request_failed",
+                    extra={"endpoint": endpoint, "attempt": attempt, "error": str(exc)},
+                )
+                continue
+            if response.status_code >= 400:
+                raise PaddleOCRVLRemoteError(
+                    f"{endpoint} returned HTTP {response.status_code}: {response.text[:500]}"
+                )
+            return dict(response.json())
+        raise PaddleOCRVLRemoteError(
+            f"request to {endpoint} failed after {self._max_retries + 1} attempt(s): {last_error}"
+        ) from last_error
 
     def describe_figure(self, image_png: bytes) -> VisualDescription:
         body = self._post("describe_figure", image_png)

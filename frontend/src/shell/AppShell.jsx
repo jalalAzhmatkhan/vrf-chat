@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { useAuth } from '../auth/AuthContext';
+import { useAuth } from '../auth/useAuth';
 import { filterNavByScopes, flattenRouteRequirements } from '../auth/filterNavByScopes';
 import { RouteGuard } from '../auth/RouteGuard';
+import { ForbiddenPage } from '../auth/ForbiddenPage';
 import { AIPulseLoader } from '../components/AIPulseLoader/AIPulseLoader';
 import { Button } from '../components/Button/Button';
 import { useScrollbarIdle } from '../hooks/useScrollbarIdle';
@@ -19,7 +20,8 @@ function getPageTitle(pathname) {
 }
 
 export function AppShell() {
-  const { user, scopes, authMeStatus, fetchMe, logoutUser, registerOnSessionExpired } = useAuth();
+  const { user, scopes, authMeStatus, apiForbidden, clearApiForbidden, fetchMe, logoutUser, registerOnSessionExpired } =
+    useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -32,6 +34,15 @@ export function AppShell() {
   useEffect(() => {
     registerOnSessionExpired(() => navigate('/login', { replace: true }));
   }, [registerOnSessionExpired, navigate]);
+
+  useEffect(() => {
+    // §3.1/F-8: an API-triggered 403 is scoped to "the page/action the user
+    // was on when it happened" — clear it on navigation so moving to a
+    // different (permitted) page doesn't keep showing the stale "tidak
+    // punya akses" state.
+    clearApiForbidden();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   useEffect(() => {
     // Avoid a duplicate fetch if we just came from a successful login
@@ -145,9 +156,13 @@ export function AppShell() {
           }}
         />
         <div ref={contentScrollRef} className={`${styles.content} scroll-region`}>
-          <RouteGuard>
-            <Outlet />
-          </RouteGuard>
+          {apiForbidden ? (
+            <ForbiddenPage />
+          ) : (
+            <RouteGuard>
+              <Outlet />
+            </RouteGuard>
+          )}
         </div>
       </div>
     </div>

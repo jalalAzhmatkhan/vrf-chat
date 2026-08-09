@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as authApi from './authApi';
 import { AuthContext } from './AuthContextBase';
-import { setAccessToken, clearAccessToken, setOnAuthFailure } from './tokenStore';
+import { setAccessToken, clearAccessToken, setOnAuthFailure, setOnForbidden } from './tokenStore';
 
 /**
  * Owns:
@@ -18,6 +18,11 @@ import { setAccessToken, clearAccessToken, setOnAuthFailure } from './tokenStore
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [authMeStatus, setAuthMeStatus] = useState('idle');
+  // §3.1/F-8: 403 = "token valid, scope kurang" on ANY API call (not just
+  // route access) — set true by the httpClient's notifyForbidden bridge,
+  // surfaced by AppShell as the same in-shell "tidak punya akses" page used
+  // by RouteGuard (03-app-shell-navigation.md §6).
+  const [apiForbidden, setApiForbidden] = useState(false);
   const onSessionExpiredRef = useRef(null);
 
   useEffect(() => {
@@ -30,12 +35,22 @@ export function AuthProvider({ children }) {
       setAuthMeStatus('error-401');
       onSessionExpiredRef.current?.();
     });
+
+    // Registered once: fires on any 403 from any API call. Deliberately
+    // does NOT touch `user`/`authMeStatus`/the access token — the session
+    // itself is still valid, just insufficiently scoped for this one
+    // request (§3.1, revised 2026-08-09 per QA F-8).
+    setOnForbidden(() => {
+      setApiForbidden(true);
+    });
   }, []);
 
   /** Registers the redirect-to-login side effect (wired from a router-aware component). */
   const registerOnSessionExpired = useCallback((callback) => {
     onSessionExpiredRef.current = callback;
   }, []);
+
+  const clearApiForbidden = useCallback(() => setApiForbidden(false), []);
 
   const fetchMe = useCallback(async () => {
     setAuthMeStatus('loading');
@@ -50,8 +65,12 @@ export function AuthProvider({ children }) {
         setUser(null);
         setAuthMeStatus('error-401');
       } else {
-        // Network failure or 5xx — shown in-shell with retry, not a redirect
-        // (03-app-shell-navigation.md §5).
+        // Network failure, 5xx, or (edge case) a 403 on /auth/me itself
+        // (only possible for a user with literally zero scopes, since this
+        // endpoint requires only the baseline scope every seeded role has)
+        // — shown in-shell with retry, not a redirect
+        // (03-app-shell-navigation.md §5). A 403 here also already
+        // triggered the global apiForbidden signal above via httpClient.
         setAuthMeStatus('error-network');
       }
       throw error;
@@ -80,12 +99,23 @@ export function AuthProvider({ children }) {
       user,
       scopes: user?.scopes ?? [],
       authMeStatus,
+      apiForbidden,
+      clearApiForbidden,
       fetchMe,
       loginWithCredentials,
       logoutUser,
       registerOnSessionExpired,
     }),
-    [user, authMeStatus, fetchMe, loginWithCredentials, logoutUser, registerOnSessionExpired],
+    [
+      user,
+      authMeStatus,
+      apiForbidden,
+      clearApiForbidden,
+      fetchMe,
+      loginWithCredentials,
+      logoutUser,
+      registerOnSessionExpired,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,6 +1,6 @@
 import { env } from './env';
 import { ApiError } from './apiError';
-import { getAccessToken, setAccessToken, notifyAuthFailure } from '../auth/tokenStore';
+import { getAccessToken, setAccessToken, notifyAuthFailure, notifyForbidden } from '../auth/tokenStore';
 
 /**
  * fetch-based HTTP client with an interceptor pattern ready for auth:
@@ -15,6 +15,14 @@ import { getAccessToken, setAccessToken, notifyAuthFailure } from '../auth/token
  *   token and notifies AuthProvider (-> redirect to /login), per
  *   Documentation/system-design/08-authentication-rbac.md DIRECT MESSAGE ->
  *   Frontend Engineer and ui-ux-design/03-app-shell-navigation.md §5.
+ * - On a 403 ("token valid, scope kurang" — §3.1, revised 2026-08-09 per
+ *   QA F-8), the refresh flow is NEVER attempted (a valid-but-insufficient
+ *   token won't become sufficient via refresh) — instead `notifyForbidden`
+ *   fires so AuthProvider/AppShell can surface the in-shell "tidak punya
+ *   akses" state for the API-triggered case too, not just direct-URL route
+ *   access (RouteGuard). This only requires the 403 status check below;
+ *   structurally, 403 never enters the refresh branch since that branch is
+ *   gated on `response.status === 401`.
  *
  * Kept as a standalone module (not a React hook) so it can be used from
  * anywhere, including outside component tree (route loaders, etc).
@@ -45,6 +53,20 @@ function buildApiError(response, body) {
     retryAfterSeconds,
     body,
   });
+}
+
+/**
+ * Terminal 403 handling ("token valid, scope kurang" — §3.1/F-8): notify
+ * AuthProvider so it can surface the in-shell "tidak punya akses" state,
+ * then throw. Deliberately does NOT touch the access token or trigger
+ * notifyAuthFailure — the token itself is still valid, refresh would not
+ * help. Shared by both the "no refresh needed" and "post-refresh retry"
+ * response paths below so 403 is handled identically either way.
+ */
+async function throwForbiddenAware(response) {
+  const body = await parseJsonSafe(response);
+  if (response.status === 403) notifyForbidden(body?.detail);
+  throw buildApiError(response, body);
 }
 
 async function performRefresh() {
@@ -113,15 +135,25 @@ export async function apiFetch(path, options = {}) {
 
     if (!retryResponse.ok) {
       const body = await parseJsonSafe(retryResponse);
+      // Anomaly case: a brand-new access token was already rejected as
+      // unauthenticated (not just under-scoped) — treat like any other
+      // session failure, per the original (pre-403-split) behavior.
       if (retryResponse.status === 401) notifyAuthFailure();
+      if (retryResponse.status === 403) notifyForbidden(body?.detail);
       throw buildApiError(retryResponse, body);
     }
     return parseJsonSafe(retryResponse);
   }
 
   if (!response.ok) {
-    const body = await parseJsonSafe(response);
-    throw buildApiError(response, body);
+    // Reached for: 403 (scope-denied, never refreshed — §3.1/F-8), any
+    // other non-401 error, and 401 on /auth/login or /auth/refresh
+    // themselves (AUTH_ENDPOINTS_NO_REFRESH_RETRY) — those 401s mean "bad
+    // credentials"/"refresh token invalid", which callers (LoginPage,
+    // AuthProvider) already interpret directly via ApiError.status, so we
+    // must NOT call notifyAuthFailure here (that would incorrectly treat a
+    // wrong-password login attempt as a session expiry).
+    await throwForbiddenAware(response);
   }
 
   return parseJsonSafe(response);

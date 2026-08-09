@@ -13,14 +13,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import api_v1_router
 from app.core.config import Settings, get_settings
 from app.core.observability import configure_logging, configure_tracing
+from app.llm_providers.factory import validate_llm_providers_or_raise
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build and configure the FastAPI application instance."""
+    """Build and configure the FastAPI application instance.
+
+    Fail-fast provider validation runs here (not lazily on first request) —
+    see `Documentation/system-design/04-provider-abstractions.md` Bagian A/B:
+    an invalid `CHAT_LLM_*`/`EVAL_JUDGE_LLM_*` combination must prevent the
+    app from starting, with a clear error, rather than fail silently later.
+    """
     settings = settings or get_settings()
 
     configure_logging(settings)
     configure_tracing(settings)
+    validate_llm_providers_or_raise(settings)
 
     app = FastAPI(
         title=settings.APP_NAME,

@@ -1,6 +1,6 @@
 [project]
 name = "backend"
-version = "0.2.0"
+version = "0.3.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -10,6 +10,7 @@ dependencies = [
     "opentelemetry-api>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
     "psycopg[binary]>=3.3.4",
+    "pydantic-ai-slim[anthropic,google,openai]>=2.27.0",
     "pydantic-settings>=2",
     "pymysql>=1.2.0",
     "python-json-logger>=4.1.0",

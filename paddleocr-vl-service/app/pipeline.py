@@ -59,6 +59,18 @@ def _build_pipeline(settings: Settings) -> Any:  # pragma: no cover
     )
 
 
+def _predict_kwargs(settings: Settings) -> dict[str, Any]:
+    """`max_new_tokens` bounds the VL model's generation length — this is
+    the single change with the best joint payoff for the two I1.10 E2E
+    findings (README.md "VRAM" + "why some requests hang"): it directly
+    caps peak KV-cache memory during generation (a real, if partial, VRAM
+    mitigation — see README.md "VRAM reduction investigation" for what was
+    and wasn't tried) AND bounds worst-case per-request latency (a request
+    can no longer generate an unbounded-length description that runs past
+    any timeout no matter how patient the caller is)."""
+    return {"max_new_tokens": settings.PADDLE_OCR_VL_SERVICE_MAX_NEW_TOKENS}
+
+
 def _decode_image(image_base64: str) -> Any:  # pragma: no cover - thin cv2 decode, real-model-only
     import cv2
     import numpy as np
@@ -102,16 +114,29 @@ def _extract_markdown_text(result_dict: dict[str, Any]) -> str | None:
 
 class PaddleOCRVLPipeline:
     """Owns the PaddleOCR-VL pipeline, with idle-unload (background thread)
-    per the design doc's mitigation layer 2. Not thread-safe for concurrent
-    inference calls by design — `PADDLE_OCR_VL_SERVICE_BATCH_SIZE=1` and the
-    Celery caller side (`backend-worker-gpu`) both already assume
-    single-flight GPU usage (`concurrency=1`), see
-    `02-ingestion-pipeline.md` §4.0 mitigation layer 1."""
+    per the design doc's mitigation layer 2.
+
+    **[I1.10 fix]** `self._lock` (an `RLock`, not a plain `Lock` — see
+    `_predict` docstring for why reentrancy is required) now covers the
+    ENTIRE `_predict` call (model load + decode + inference), not just
+    `_ensure_loaded()` as an earlier version did. This is what makes
+    `PADDLE_OCR_VL_SERVICE_BATCH_SIZE=1`/"single-flight GPU usage" an
+    actually-enforced guarantee rather than an assumption that happened to
+    hold only as long as the FastAPI route handlers were `async def`
+    (blocking the whole event loop serialized everything "by accident").
+    Now that the route handlers are synchronous `def` (dispatched to
+    Starlette's threadpool, see `app/main.py`), FastAPI CAN serve multiple
+    requests concurrently on different threads — this lock is what
+    prevents two of them from calling `pipeline.predict()` on the GPU at
+    the same time (a real VRAM/correctness risk on a 6GB card, not just a
+    style preference), while still letting cheap endpoints like `/health`
+    (which never touches this lock) respond immediately even while a
+    request is queued waiting for its turn here."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._pipeline: Any | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._last_used_at: float = time.monotonic()
         self._stop_idle_watcher = threading.Event()
         self._idle_watcher = threading.Thread(target=self._watch_idle, daemon=True)
@@ -153,11 +178,15 @@ class PaddleOCRVLPipeline:
             return self._pipeline
 
     def _predict(self, image_base64: str) -> dict[str, Any]:  # pragma: no cover
-        pipeline = self._ensure_loaded()
-        image = _decode_image(image_base64)
-        results = pipeline.predict(image)
-        first = results[0] if results else None
-        return _first_prediction_to_dict(first)
+        """`self._lock` wraps the WHOLE call (not just `_ensure_loaded()`)
+        so at most one GPU inference runs at a time regardless of how many
+        concurrent HTTP requests arrive — see class docstring."""
+        with self._lock:
+            pipeline = self._ensure_loaded()
+            image = _decode_image(image_base64)
+            results = pipeline.predict(image, **_predict_kwargs(self._settings))
+            first = results[0] if results else None
+            return _first_prediction_to_dict(first)
 
     def describe_figure(self, image_base64: str) -> VisualDescriptionResponse:
         result = self._predict(image_base64)

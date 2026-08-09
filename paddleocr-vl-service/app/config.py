@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     # where this service and backend-worker-gpu's Docling could collide on
     # the same physical GPU.
     PADDLE_OCR_VL_SERVICE_IDLE_UNLOAD_SECONDS: int = 300
+    # [I1.10 fix] bounds VL generation length — caps peak KV-cache memory
+    # during generation (partial VRAM mitigation) AND bounds worst-case
+    # per-request latency (see app/pipeline.py `_predict_kwargs` docstring
+    # and README.md "VRAM reduction investigation"). 1024 is a starting
+    # point (enough for a detailed but not unbounded markdown description
+    # of one figure/table/page region) — not benchmarked against extraction
+    # quality loss at this length, flagged as an open calibration question.
+    PADDLE_OCR_VL_SERVICE_MAX_NEW_TOKENS: int = 1024
 
 
 @lru_cache

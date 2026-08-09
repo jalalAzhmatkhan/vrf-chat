@@ -69,12 +69,55 @@ throwaway venv containing only `paddleocr[doc-parser]` + `paddlepaddle-gpu`
    (`PADDLE_OCR_VL_SERVICE_BATCH_SIZE=1` non-negotiable, idle-unload after
    `PADDLE_OCR_VL_SERVICE_IDLE_UNLOAD_SECONDS`).
 
+## ⚠️ KNOWN RISK — VRAM headroom is extremely tight, explicitly flagged for Jalal
+
+**Peak VRAM observed across multiple live runs: 5.92-5.98GB of the 6.14GB
+(6144 MiB) RTX 3060 card — consistently, not a one-off.** This is a real,
+known operational risk for anyone running this service on a 6GB GPU, not a
+theoretical concern: only ~150-220MB of headroom remains at peak, meaning
+essentially **any** additional GPU memory pressure (a slightly larger/more
+complex image, a concurrent GPU-using process on the host — even outside
+Docker/WSL, e.g. a browser with hardware acceleration — or `backend-worker-gpu`'s
+Docling not having fully released its own VRAM yet, see §4.0 mitigation
+layers 1-2) can plausibly push this over budget and trigger an out-of-memory
+crash mid-ingestion. This is **not hypothetical** — it is the realistic
+day-to-day operating margin of this service on the target dev hardware.
+
+### VRAM reduction investigated (I1.10), honest result: no further reduction found
+
+Per explicit instruction to investigate before accepting this risk as final:
+
+| Lever | Status | Result |
+|---|---|---|
+| `PADDLE_OCR_VL_SERVICE_BATCH_SIZE=1` | Already minimal | N/A — already at the floor, `>1` not evaluated (design doc explicitly prohibits raising without benchmark data proving it fits, which this finding argues strongly against attempting) |
+| `precision=fp16` | Already minimal for this model | N/A — already the lowest precision PaddleOCR-VL's `precision` parameter supports without dedicated quantization tooling (int8/4-bit) that isn't part of `paddleocr`'s standard inference path and wasn't evaluated (would require custom quantization work, out of scope for this session) |
+| `max_new_tokens` cap (this session's addition, default 1024) | **Tested live** | **No measurable VRAM reduction** — peak was ~5.96GB with the cap vs. ~5.98GB without (within measurement noise). Kept anyway because it bounds worst-case per-request *latency* (a real, separate benefit — see "Why some requests hang" below), just not VRAM. |
+| `use_chart_recognition=False` | Not fully evaluated | Attempted but not conclusively measured within session time — construction alone doesn't eagerly allocate the full VRAM footprint (lazy weight transfer to GPU appears to happen at/near first real inference call, not at pipeline construction), so a clean before/after comparison needs a full inference run per variant, which given the ~35-90s per real inference call and the number of variants worth testing, was not completed. **Flagged as unfinished investigation, not a dead end** — a legitimate next step for whoever picks this up.
+| Smaller `pipeline_version` (`"v1"`/`"v1.5"` vs default `"v1.6"`) | Not evaluated | Older pipeline versions may use smaller/different models — not tested this session (would trade extraction quality for memory, and quality impact is unknown without evaluation data) |
+
+**Conclusion, stated plainly**: with the levers that were fully verified
+this session (batch size, precision, generation length cap), **peak VRAM
+usage could not be brought down from ~5.96-5.98GB**. The remaining
+untested levers (`use_chart_recognition=False`, older `pipeline_version`,
+real quantization) may or may not help and were not ruled in or out —
+genuinely open follow-up work, not something silently abandoned.
+**Until further investigated, treat this service's real-world VRAM
+requirement on a 6GB GPU as ~6GB, i.e. effectively the entire card**, and
+plan operational mitigations (idle-unload already implemented; closing
+other GPU-using host applications during ingestion; monitoring `nvidia-smi`
+during any large ingestion run; being prepared for intermittent OOM,
+especially on complex diagrams/tables that may need more memory than the
+single test image this was benchmarked against) rather than assuming the
+current mitigations (`batch=1`, `fp16`, idle-unload) are sufficient to rule
+out OOM entirely.
+
 ### Not yet verified
 
 - Multiple concurrent/sequential inference calls in a long-running service
-  process (the live test above was a single one-shot script, not this
-  actual FastAPI service under load) — recommended as an operational check
-  during Q1.2 (QA Engineer's WSL/Docker GPU verification).
+  process under real production-like load (the live tests were one-shot
+  scripts + a handful of manual requests during I1.10, not sustained load)
+  — recommended as an operational check during Q1.2 (QA Engineer's
+  WSL/Docker GPU verification).
 - The full Docker image build (`docker build` of this service's
   `Dockerfile`) — dependency resolution was verified via `uv sync` in a
   WSL-native venv (same rationale as I1.6's Docling verification: identical

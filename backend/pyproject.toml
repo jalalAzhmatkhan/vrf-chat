@@ -1,12 +1,13 @@
 [project]
 name = "backend"
-version = "0.4.0"
+version = "0.5.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.19.1",
     "boto3>=1.43.67",
+    "celery>=5.6.3",
     "fastapi>=0.141.1",
     "opentelemetry-api>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
@@ -15,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2",
     "pymysql>=1.2.0",
     "python-json-logger>=4.1.0",
+    "redis>=8.1.0",
     "sqlalchemy>=2.0.51",
     "uvicorn[standard]>=0.52.1",
 ]

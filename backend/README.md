@@ -58,3 +58,22 @@ Coverage is enforced at 100% (`--cov-fail-under=100`, see `pyproject.toml`).
 uv run ruff check .
 uv run mypy app
 ```
+
+## Docker (via WSL only — see repo root `CLAUDE.md` §5)
+
+`docker`/`docker compose` must be run from a WSL shell, never Windows-native
+PowerShell/CMD. From WSL, at the `vrf-chat/` repo root (not `backend/`):
+
+```bash
+docker compose up --build                 # backend-api, backend-worker, redis, postgres, qdrant, minio, frontend
+docker compose --profile gpu up --build   # + backend-worker-gpu (GPU ingestion queue)
+docker compose --profile kg up --build    # + neo4j (Fase 3, off by default)
+```
+
+All host-published ports are overridable via env vars if they collide with
+other projects on a shared dev machine, e.g.
+`POSTGRES_HOST_PORT=15432 docker compose up` — see comments at the top of
+`../docker-compose.yml`.
+
+`backend/Dockerfile` is multi-stage/multi-target (`api`/`worker`/
+`worker-gpu`), all installed via `uv` (never bare pip).

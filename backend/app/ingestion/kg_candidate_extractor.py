@@ -30,6 +30,51 @@ Postgres row ids exist, see `docling_parser.py` module docstring) — the
 caller remaps it to the real `elements.id` using the same
 `local_id -> db_id` mapping `canonical_store.store_pages_and_elements`
 already produces internally.
+
+**[KG-W1.1, 2026-08-10 — precision/recall bugfixes]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §2/§5.4/§6.2
+(R4 + R-addendum) for the literature/design rationale. This revision is
+additionally grounded in a **live Postgres query against `document_id=3`**
+(286-page Zeggo VRV IV REYQ manual, re-run 2026-08-10 to confirm/refine
+System Analyst's original findings before implementing fixes), which
+confirmed:
+
+1. **Zero `CONNECTED_TO` relations ever extracted, root cause confirmed (not
+   just hypothesized) — and NOT fixable in this module.**
+   `SELECT count(*) FILTER (WHERE (visual_description->>'components') !=
+   '[]' OR (visual_description->>'connections') != '[]' OR
+   visual_description->>'figure_type' IS NOT NULL) FROM elements WHERE
+   document_id=3 AND visual_description IS NOT NULL` → **0 of 2916 rows**.
+   Reading `paddleocr-vl-service/app/pipeline.py`
+   `PaddleOCRVLPipeline.describe_figure()` confirms why:  it only ever sets
+   `description=_extract_markdown_text(result)` — `figure_type`,
+   `components`, `connections` are never populated by the service (they
+   stay at their dataclass defaults, `None`/`[]`), because the VLM call
+   requests free-text/markdown output, not structured JSON. This is a
+   **Stage 4** behavior (`paddleocr-vl-service`) — explicitly out of scope
+   for this module per Wave 1 DoD ("Jangan ubah orchestrator.py atau Stage
+   1-4"). `extract_from_visual_description()` below is therefore working
+   correctly against a contract (`VisualDescription.components`/
+   `.connections`) that real Stage 4 output never populates — reported to
+   System Analyst (see STATUS REPORT) as a Stage 4 follow-up candidate
+   (structured-output prompting) rather than fixed here. Left unchanged,
+   still exercised by tests using a fake `CascadeResult` that DOES populate
+   `components`/`connections`, so the code path keeps working the moment
+   Stage 4 starts returning them.
+2. `visual_description.description` (the field Stage 4 DOES populate,
+   confirmed non-empty for 381/2916 rows checked) contains real,
+   substantive text (wiring-diagram legends, table markdown with component
+   codes, etc. — see `elements.id=7814`/`7806` in `document_id=3`) that the
+   existing deterministic text matchers (component keywords, sensor/
+   connector identifiers, anchored error codes) can extract *entities*
+   from, same as narrative `element.text`. `extract_from_visual_description`
+   now also runs `_extract_entities_from_text` against `vd.description`
+   for this reason — a real, in-scope recall improvement for the VLM path
+   that does not require Stage 4 changes. **Relations remain unaddressed**
+   (parsing free-text markdown into reliable `subject/predicate/object`
+   triples is not attempted — would violate the determinism/precision bar;
+   left to Stage 4 structured-output improvements or Tier 2 R8 GLiREL-based
+   relation typing, Wave 2).
 """
 
 from __future__ import annotations
@@ -39,27 +84,57 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from app.domain.vrf_vocabulary import (
+    COMPONENT_KEYWORD_PATTERNS,
     COMPONENT_KEYWORDS,
     CONNECTOR_ID_PATTERN,
+    ERROR_CODE_ANCHOR_PATTERN,
     ERROR_CODE_PATTERN,
     SENSOR_ID_PATTERN,
 )
-from app.ingestion.docling_parser import DoclingParseResult, ElementDraft
+from app.ingestion.docling_parser import ELEMENT_TYPE_TABLE, DoclingParseResult, ElementDraft
 from app.ingestion.paddleocr_vl_cascade import CascadeResult
 
 # Confidence bands — deliberately conservative and documented, not tuned
 # against a labeled dataset (none exists yet for KG candidates). Identifier
 # regex matches (TH.../CN...) are higher confidence than free-text keyword
-# matches (which can be part of unrelated prose); the error code pattern is
-# the lowest confidence of all (see vrf_vocabulary.py ERROR_CODE_PATTERN
-# docstring — single-letter prefixes collide with ordinary abbreviations).
+# matches (which can be part of unrelated prose).
 CONFIDENCE_VLM_COMPONENT = 0.6
 CONFIDENCE_VLM_CONNECTION = 0.5
 CONFIDENCE_TEXT_KEYWORD = 0.5
 CONFIDENCE_SENSOR_ID = 0.7
 CONFIDENCE_CONNECTOR_ID = 0.7
-CONFIDENCE_ERROR_CODE_ELEMENT_TYPE = 0.8
-CONFIDENCE_ERROR_CODE_PATTERN = 0.4
+
+# **[KG-W1.1 fix]** `element_type == "error_code"` (formerly
+# `CONFIDENCE_ERROR_CODE_ELEMENT_TYPE = 0.8`) was confirmed dead code — no
+# Docling `DocItemLabel` maps to `"error_code"`
+# (`docling_parser._LABEL_TO_ELEMENT_TYPE`), and no Stage 3/4 code re-tags
+# any element to it either, so this branch has never once fired on real
+# ingested data (`document_id=3`: 0 elements with `element_type ==
+# "error_code"`, despite 192 `ERROR_CODE_PATTERN` matches all landing in the
+# `else` branch at the old flat `CONFIDENCE_ERROR_CODE_PATTERN = 0.4`).
+# Replaced with the heuristic explicitly suggested as an alternative in
+# `09-kg-extraction-strategy.md` §5.4: "elemen tabel + heading error
+# code/malfunction code terdekat" — implemented as
+# `_has_error_code_anchor()` below (checks `element.text` and
+# `element.section_path` for `ERROR_CODE_ANCHOR_PATTERN`), with a table
+# element getting the same elevated confidence the old (dead) branch used
+# to grant, a non-table element with an anchor getting a middle tier, and
+# an unanchored match getting a confidence *lower* than the old flat value
+# (empirically, unanchored matches are mostly noise — see
+# `ERROR_CODE_ANCHOR_PATTERN` docstring in `vrf_vocabulary.py`).
+CONFIDENCE_ERROR_CODE_TABLE_ANCHORED = 0.75
+CONFIDENCE_ERROR_CODE_ANCHORED = 0.6
+CONFIDENCE_ERROR_CODE_UNANCHORED = 0.3
+
+# **[KG-W1.1 fix]** Applied to `COMPONENT_KEYWORDS` matches on an element
+# that matches MORE than this many *distinct* keywords at once — empirically
+# a strong signal the element is a glossary/spec-list page (every term
+# defined in one place) rather than a locally-relevant reference (confirmed:
+# `document_id=3` has a real element matching 14/20 `COMPONENT_KEYWORDS`
+# simultaneously). Such matches are kept (never invent-by-omission — Fase 3
+# review can still see them) but at reduced confidence.
+COMPONENT_KEYWORD_GLOSSARY_THRESHOLD = 5
+CONFIDENCE_TEXT_KEYWORD_GLOSSARY_PAGE = 0.2
 
 RELATION_CONNECTED_TO = "CONNECTED_TO"
 
@@ -107,6 +182,107 @@ def _parse_connection(connection: str) -> tuple[str, str] | None:
     return subject, obj
 
 
+def _has_error_code_anchor(text: str | None, section_path: list[str]) -> bool:
+    """**[KG-W1.1, R4]** True if `ERROR_CODE_ANCHOR_PATTERN` (see
+    `vrf_vocabulary.py`) matches the element's own text or its heading
+    hierarchy (`section_path` — e.g. a table under a "Malfunction Code
+    Table" heading counts as anchored even if the word never appears in the
+    table's own cells)."""
+    haystack = " ".join([text or "", *section_path])
+    return bool(ERROR_CODE_ANCHOR_PATTERN.search(haystack))
+
+
+def _extract_entities_from_text(
+    text: str,
+    *,
+    element_type: str,
+    section_path: list[str],
+    document_ref: str,
+    page_number: int,
+    element_id: int,
+) -> list[KGCandidateEntity]:
+    """Deterministic component/sensor/connector/error-code entity matchers,
+    shared by `extract_from_text` (`element.text`) and
+    `extract_from_visual_description` (Stage 4's `visual_description
+    .description` markdown, see module docstring finding #2) — the same
+    identifier/keyword is recognized identically regardless of which field
+    it came from."""
+    entities: list[KGCandidateEntity] = []
+
+    # **[KG-W1.1 fix]** Word-boundary match per keyword (was `keyword in
+    # text_lower`, a substring check — see `COMPONENT_KEYWORD_PATTERNS`
+    # docstring). `is_glossary_like`/reduced confidence: see
+    # `COMPONENT_KEYWORD_GLOSSARY_THRESHOLD` docstring above.
+    matched_keywords = [
+        keyword for keyword, pattern in COMPONENT_KEYWORD_PATTERNS.items() if pattern.search(text)
+    ]
+    is_glossary_like = len(matched_keywords) > COMPONENT_KEYWORD_GLOSSARY_THRESHOLD
+    keyword_confidence = (
+        CONFIDENCE_TEXT_KEYWORD_GLOSSARY_PAGE if is_glossary_like else CONFIDENCE_TEXT_KEYWORD
+    )
+    for keyword in matched_keywords:
+        entities.append(
+            KGCandidateEntity(
+                name=keyword,
+                entity_type=COMPONENT_KEYWORDS[keyword],
+                confidence=keyword_confidence,
+                source_document=document_ref,
+                page=page_number,
+                element_id=element_id,
+            )
+        )
+
+    for match in SENSOR_ID_PATTERN.finditer(text):
+        entities.append(
+            KGCandidateEntity(
+                name=match.group(0),
+                entity_type="Sensor",
+                confidence=CONFIDENCE_SENSOR_ID,
+                source_document=document_ref,
+                page=page_number,
+                element_id=element_id,
+            )
+        )
+
+    for match in CONNECTOR_ID_PATTERN.finditer(text):
+        entities.append(
+            KGCandidateEntity(
+                name=match.group(0),
+                entity_type="Connector",
+                confidence=CONFIDENCE_CONNECTOR_ID,
+                source_document=document_ref,
+                page=page_number,
+                element_id=element_id,
+            )
+        )
+
+    if ERROR_CODE_PATTERN.search(text):
+        # **[KG-W1.1 fix, R4]** Confidence now depends on contextual anchor
+        # presence (see `_has_error_code_anchor`/`CONFIDENCE_ERROR_CODE_*`
+        # docstrings above) instead of the old dead `element_type ==
+        # "error_code"` branch / flat confidence for everything else.
+        anchor_matched = _has_error_code_anchor(text, section_path)
+        if element_type == ELEMENT_TYPE_TABLE and anchor_matched:
+            error_code_confidence = CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+        elif anchor_matched:
+            error_code_confidence = CONFIDENCE_ERROR_CODE_ANCHORED
+        else:
+            error_code_confidence = CONFIDENCE_ERROR_CODE_UNANCHORED
+        for match in ERROR_CODE_PATTERN.finditer(text):
+            entities.append(
+                KGCandidateEntity(
+                    name=match.group(1),
+                    entity_type="ErrorCode",
+                    confidence=error_code_confidence,
+                    source_document=document_ref,
+                    page=page_number,
+                    element_id=element_id,
+                )
+            )
+
+    return entities
+
+
 def extract_from_visual_description(
     element: ElementDraft, cascade_result: CascadeResult, document_ref: str
 ) -> ElementKGCandidates:
@@ -144,6 +320,23 @@ def extract_from_visual_description(
             )
         )
 
+    if vd.description:
+        # **[KG-W1.1 fix]** See module docstring finding #2 — real Stage 4
+        # output never populates `components`/`connections` today, but does
+        # populate `description` (markdown/free text), which the same
+        # deterministic matchers used for narrative `element.text` can also
+        # mine for entities.
+        result.entities.extend(
+            _extract_entities_from_text(
+                vd.description,
+                element_type=element.element_type,
+                section_path=element.section_path,
+                document_ref=document_ref,
+                page_number=element.page_number,
+                element_id=element.local_id,
+            )
+        )
+
     return result
 
 
@@ -152,70 +345,16 @@ def extract_from_text(element: ElementDraft, document_ref: str) -> ElementKGCand
     if not element.text:
         return result
 
-    text = element.text
-    text_lower = text.lower()
-
-    for keyword, entity_type in COMPONENT_KEYWORDS.items():
-        if keyword in text_lower:
-            result.entities.append(
-                KGCandidateEntity(
-                    name=keyword,
-                    entity_type=entity_type,
-                    confidence=CONFIDENCE_TEXT_KEYWORD,
-                    source_document=document_ref,
-                    page=element.page_number,
-                    element_id=element.local_id,
-                )
-            )
-
-    for match in SENSOR_ID_PATTERN.finditer(text):
-        result.entities.append(
-            KGCandidateEntity(
-                name=match.group(0),
-                entity_type="Sensor",
-                confidence=CONFIDENCE_SENSOR_ID,
-                source_document=document_ref,
-                page=element.page_number,
-                element_id=element.local_id,
-            )
+    result.entities.extend(
+        _extract_entities_from_text(
+            element.text,
+            element_type=element.element_type,
+            section_path=element.section_path,
+            document_ref=document_ref,
+            page_number=element.page_number,
+            element_id=element.local_id,
         )
-
-    for match in CONNECTOR_ID_PATTERN.finditer(text):
-        result.entities.append(
-            KGCandidateEntity(
-                name=match.group(0),
-                entity_type="Connector",
-                confidence=CONFIDENCE_CONNECTOR_ID,
-                source_document=document_ref,
-                page=element.page_number,
-                element_id=element.local_id,
-            )
-        )
-
-    if element.element_type == "error_code":
-        result.entities.append(
-            KGCandidateEntity(
-                name=text.strip(),
-                entity_type="ErrorCode",
-                confidence=CONFIDENCE_ERROR_CODE_ELEMENT_TYPE,
-                source_document=document_ref,
-                page=element.page_number,
-                element_id=element.local_id,
-            )
-        )
-    else:
-        for match in ERROR_CODE_PATTERN.finditer(text):
-            result.entities.append(
-                KGCandidateEntity(
-                    name=match.group(1),
-                    entity_type="ErrorCode",
-                    confidence=CONFIDENCE_ERROR_CODE_PATTERN,
-                    source_document=document_ref,
-                    page=element.page_number,
-                    element_id=element.local_id,
-                )
-            )
-
+    )
     return result
 
 

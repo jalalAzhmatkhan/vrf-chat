@@ -49,6 +49,11 @@ from app.ingestion.docling_parser import (
     DoclingParseResult,
     ElementDraft,
 )
+from app.ingestion.kg_candidate_extractor import (
+    ElementKGCandidates,
+    entities_to_jsonb,
+    relations_to_jsonb,
+)
 from app.ingestion.paddleocr_vl_cascade import CascadeResult, render_bbox_crop
 from app.storage.base import ObjectStorageClient
 
@@ -161,14 +166,23 @@ def store_pages_and_elements(
     pdf_path: str | Path,
     parse_result: DoclingParseResult,
     cascade_results: list[CascadeResult] | None = None,
+    kg_candidates: dict[int, ElementKGCandidates] | None = None,
 ) -> CanonicalStoreSummary:
-    """Persist Stage 2 (+ optional Stage 4) output for `document`.
+    """Persist Stage 2 (+ optional Stage 4, + optional I1.9 KG candidates)
+    output for `document`.
 
     `parse_result.elements` MUST be in the order produced by
     `map_document_to_elements` (parent elements before their children,
     `local_id` ascending) — this is relied upon to resolve `parent_id`
     within a single pass, per-page.
+
+    `kg_candidates` (from `app.ingestion.kg_candidate_extractor
+    .extract_kg_candidates`, I1.9) is keyed by the same `ElementDraft
+    .local_id` used throughout this function — entries are written to
+    `elements.kg_candidate_entities`/`kg_candidate_relations` (default `[]`
+    when absent, per `06-data-schema.md` §1).
     """
+    kg_candidates = kg_candidates or {}
     summary = CanonicalStoreSummary(document_id=document.id)
     cascade_by_local_id = {
         r.task.element_local_id: r
@@ -269,11 +283,32 @@ def store_pages_and_elements(
                     extraction_method=extraction_method,
                     extraction_confidence=draft.extraction_confidence,
                     visual_description=visual_description,
+                    kg_candidate_entities=[],
+                    kg_candidate_relations=[],
                 )
                 db.add(element_row)
                 db.flush()
                 local_id_to_db_id[draft.local_id] = element_row.id
                 summary.elements_stored += 1
+
+                # KG candidates are extracted keyed by `ElementDraft.local_id`
+                # (I1.9, app/ingestion/kg_candidate_extractor.py) — every
+                # candidate's own `element_id` field is set to that same
+                # local_id at extraction time, so it can now be rewritten to
+                # the real `elements.id` we just learned from the flush
+                # above (provenance must point at the real row, not the
+                # ingestion-time-only local_id — see 03-retrieval-chunking.md
+                # §4 element_ids -> elements.id traceability chain).
+                element_candidates = kg_candidates.get(draft.local_id)
+                if element_candidates is not None:
+                    kg_entities = entities_to_jsonb(element_candidates.entities)
+                    kg_relations = relations_to_jsonb(element_candidates.relations)
+                    for entity_dict in kg_entities:
+                        entity_dict["element_id"] = element_row.id
+                    for relation_dict in kg_relations:
+                        relation_dict["element_id"] = element_row.id
+                    element_row.kg_candidate_entities = kg_entities
+                    element_row.kg_candidate_relations = kg_relations
 
             summary.pages_stored += 1
 

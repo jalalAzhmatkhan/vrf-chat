@@ -124,6 +124,16 @@ def test_parse_html_table_colspan_expands_across_columns() -> None:
     assert rows[1] == {"col_0": "a", "col_1": "b", "col_2": "c"}
 
 
+def test_parse_html_table_non_numeric_colspan_defaults_to_one() -> None:
+    """[QA phase-1-qa-report.md follow-up, coverage gap] A non-numeric
+    `colspan` attribute (malformed real-world HTML, e.g. `colspan="auto"`)
+    must not crash — falls back to `colspan=1` (no expansion) rather than
+    propagating the `ValueError` from `int(value)`."""
+    html = '<table><tr><td colspan="auto">x</td><td>y</td></tr></table>'
+    rows = ck._parse_html_table(html)
+    assert rows == [{"col_0": "x", "col_1": "y"}]
+
+
 def test_parse_html_table_no_rows_returns_empty() -> None:
     assert ck._parse_html_table("<table></table>") == []
 

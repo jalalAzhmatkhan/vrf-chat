@@ -15,18 +15,17 @@ C2.3) is responsible for invoking/caching on its own schedule — kept out of
 **Placement note**: `app/domain/vrf_vocabulary.py`'s module docstring
 describes itself as "the intended home for the MVP query-expansion
 dictionary ... when that's implemented". This module deliberately lives
-alongside it instead of inside it, to avoid editing `vrf_vocabulary.py` —
-that file is being actively worked on by a parallel Backend Engineer
-(KG Foundation Wave 1, separate git worktree) per explicit instruction to
-avoid touching `app/ingestion/kg_candidate_extractor.py`/
-`app/domain/vrf_vocabulary.py`/`app/ingestion/document_structure_graph.py`
-to prevent merge conflicts. This module *reads* `vrf_vocabulary.py`'s
-identifier patterns/component keywords (the single source of truth for
-those), it does not duplicate or modify them. Flagged for System
-Analyst/PM awareness — consolidating the two modules (or formally
-relocating this dictionary into `vrf_vocabulary.py`) is a reasonable
-follow-up once the parallel KG branch merges, not done here to avoid the
-exact conflict risk that instruction exists to prevent.
+alongside it instead of inside it — originally to avoid editing
+`vrf_vocabulary.py` while a parallel Backend Engineer (KG Foundation
+Wave 1) was actively working on it. That work has since merged into
+`master` (`ERROR_CODE_PATTERN` renamed to `ERROR_CODE_MAIN_PATTERN` plus
+new Daikin/Zeggo identifier patterns — this module was updated to match,
+see the rebase fix commit) — the original conflict-avoidance reason no
+longer applies, but this module still only *reads* `vrf_vocabulary.py`'s
+identifier patterns/component keywords rather than duplicating them.
+Consolidating the two modules is a reasonable non-blocking follow-up,
+still not done here to keep this fix scoped to the QA-reported rebase
+break rather than an unrelated restructuring.
 """
 
 from __future__ import annotations
@@ -39,10 +38,12 @@ from sqlalchemy.orm import Session
 from app.db.models.documents import Document
 from app.db.models.error_codes import ErrorCode
 from app.domain.vrf_vocabulary import (
-    COMPONENT_KEYWORDS,
+    COMPONENT_KEYWORD_PATTERNS,
     CONNECTOR_ID_PATTERN,
-    ERROR_CODE_PATTERN,
+    ERROR_CODE_MAIN_PATTERN,
     SENSOR_ID_PATTERN,
+    SENSOR_ID_PATTERN_DAIKIN,
+    TERMINAL_ID_PATTERN,
 )
 
 # Symptom phrase (lowercase, Indonesian/English as a technician would type
@@ -101,6 +102,7 @@ class ExpandedQuery:
     detected_error_codes: tuple[str, ...]
     detected_sensor_ids: tuple[str, ...]
     detected_connector_ids: tuple[str, ...]
+    detected_terminal_ids: tuple[str, ...]
     detected_components: tuple[str, ...]
     detected_model_families: tuple[str, ...]
     expanded_query_text: str
@@ -152,11 +154,19 @@ def expand_query(query: str, known_entities: KnownEntities | None = None) -> Exp
     Combines three signals, all heuristic (no LLM call):
     1. Domain dictionary synonym lookup (`SYMPTOM_SYNONYMS`) on substring
        match against the normalized (lowercased) query.
-    2. Regex identifier detection (`vrf_vocabulary.ERROR_CODE_PATTERN`/
-       `SENSOR_ID_PATTERN`/`CONNECTOR_ID_PATTERN`), run case-insensitively
-       (technicians may type `p8` instead of `P8`) — detected identifiers
-       are normalized to uppercase, their canonical manual form.
-    3. Component keyword detection (`vrf_vocabulary.COMPONENT_KEYWORDS`).
+    2. Regex identifier detection (`vrf_vocabulary.ERROR_CODE_MAIN_PATTERN`/
+       `SENSOR_ID_PATTERN`+`SENSOR_ID_PATTERN_DAIKIN`/`CONNECTOR_ID_PATTERN`/
+       `TERMINAL_ID_PATTERN`), run case-insensitively (technicians may type
+       `p8` instead of `P8`) — detected identifiers are normalized to
+       uppercase, their canonical manual form. Both the Mitsubishi
+       (`TH#`/`CN#`) and Daikin/Zeggo (`R#T`/`X#M`) identifier conventions
+       are matched unconditionally (UNION, not per-vendor routing) — see
+       `vrf_vocabulary.py`'s "SA-KG.1" module docstring section for why this
+       is safe; our actual indexed corpus (`document_id=3`) is a Daikin/
+       Zeggo manual, so the Daikin patterns matter in practice today.
+    3. Component keyword detection (`vrf_vocabulary.COMPONENT_KEYWORD_PATTERNS`
+       — word-boundary-anchored, not a naive substring check, so "fan
+       motor" doesn't spuriously match inside "fan motors").
 
     `known_entities` (optional) is used only to corroborate/extend exact
     identifier matches already indexed (e.g. a `model_family` string that
@@ -175,9 +185,12 @@ def expand_query(query: str, known_entities: KnownEntities | None = None) -> Exp
         [syn for phrase in matched_synonym_phrases for syn in SYMPTOM_SYNONYMS[phrase]]
     )
 
-    detected_error_codes = set(ERROR_CODE_PATTERN.findall(upper_query))
-    detected_sensor_ids = set(SENSOR_ID_PATTERN.findall(upper_query))
+    detected_error_codes = set(ERROR_CODE_MAIN_PATTERN.findall(upper_query))
+    detected_sensor_ids = set(SENSOR_ID_PATTERN.findall(upper_query)) | set(
+        SENSOR_ID_PATTERN_DAIKIN.findall(upper_query)
+    )
     detected_connector_ids = set(CONNECTOR_ID_PATTERN.findall(upper_query))
+    detected_terminal_ids = set(TERMINAL_ID_PATTERN.findall(upper_query))
     detected_model_families: set[str] = set()
 
     if known_entities is not None:
@@ -189,7 +202,9 @@ def expand_query(query: str, known_entities: KnownEntities | None = None) -> Exp
                 detected_model_families.add(model_family)
 
     detected_components = tuple(
-        keyword for keyword in COMPONENT_KEYWORDS if keyword in normalized_query
+        keyword
+        for keyword, pattern in COMPONENT_KEYWORD_PATTERNS.items()
+        if pattern.search(query)
     )
 
     expanded_query_text = " ".join(
@@ -200,6 +215,7 @@ def expand_query(query: str, known_entities: KnownEntities | None = None) -> Exp
                 *sorted(detected_error_codes),
                 *sorted(detected_sensor_ids),
                 *sorted(detected_connector_ids),
+                *sorted(detected_terminal_ids),
                 *detected_components,
                 *sorted(detected_model_families),
             ]
@@ -214,6 +230,7 @@ def expand_query(query: str, known_entities: KnownEntities | None = None) -> Exp
         detected_error_codes=tuple(sorted(detected_error_codes)),
         detected_sensor_ids=tuple(sorted(detected_sensor_ids)),
         detected_connector_ids=tuple(sorted(detected_connector_ids)),
+        detected_terminal_ids=tuple(sorted(detected_terminal_ids)),
         detected_components=detected_components,
         detected_model_families=tuple(sorted(detected_model_families)),
         expanded_query_text=expanded_query_text,

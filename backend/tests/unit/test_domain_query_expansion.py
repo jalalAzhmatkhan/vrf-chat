@@ -83,6 +83,26 @@ def test_expand_query_no_identifiers_detected() -> None:
     assert result.detected_error_codes == ()
     assert result.detected_sensor_ids == ()
     assert result.detected_connector_ids == ()
+    assert result.detected_terminal_ids == ()
+
+
+def test_expand_query_detects_daikin_sensor_id() -> None:
+    # SA-KG.1: R#T is the Daikin/Zeggo sensor convention — our actual
+    # indexed corpus (document_id=3) is a Daikin/Zeggo manual.
+    result = qe.expand_query("check R1T sensor reading")
+    assert "R1T" in result.detected_sensor_ids
+
+
+def test_expand_query_detects_terminal_id() -> None:
+    result = qe.expand_query("check terminal X2M wiring")
+    assert result.detected_terminal_ids == ("X2M",)
+
+
+def test_expand_query_component_keyword_word_boundary_not_substring() -> None:
+    # "fan motors" (plural) must not match via naive substring the way it
+    # would with `"fan motor" in text` — word-boundary pattern only.
+    result = qe.expand_query("check the fan motors assembly")
+    assert "fan motor" not in result.detected_components
 
 
 def test_expand_query_multiple_error_codes_sorted() -> None:

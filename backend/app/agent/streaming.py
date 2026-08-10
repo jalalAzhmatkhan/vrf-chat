@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -174,6 +174,7 @@ async def stream_turn(
     model: Model | KnownModelName | str | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     usage_limits: UsageLimits | None = None,
+    on_done: Callable[[TechnicalAnswer, int, int], None] | None = None,
     conversation_id: int | None = None,
 ) -> AsyncIterator[str]:
     """SSE event generator for `POST /api/v1/chat/stream` — yields fully
@@ -185,8 +186,19 @@ async def stream_turn(
     `usage_limits`: F2-06 round-trip cap, same default/rationale as
     `app/agent/vrf_agent.py::run_agent_turn`.
 
-    `conversation_id`: F2-04/§5.6 — see `_with_conversation_id`. Pure
-    passthrough; this module never resolves/creates a conversation itself.
+    `on_done` (optional): called synchronously with
+    `(final_answer, ttft_ms, total_latency_ms)` right before the `done`
+    event is yielded — this is the hook `app/api/v1/chat.py` (C2.6) uses to
+    persist the turn to `messages`/`citations` without this module (which
+    stays DB-agnostic on purpose, see `01-architecture-overview.md` §3
+    module boundary principle) needing any DB/persistence knowledge itself.
+    Never called on the timeout/error paths (nothing to persist for a turn
+    that produced no answer) — see F2-08 for why that gap is otherwise
+    handled defensively at the persistence layer instead.
+
+    `conversation_id` (optional): F2-04/§5.6 — see `_with_conversation_id`.
+    Pure passthrough; this module never resolves/creates a conversation
+    itself (kept DB-agnostic, same module-boundary principle as `on_done`).
     """
     start = time.monotonic()
     ttft_ms: int | None = None
@@ -284,6 +296,9 @@ async def stream_turn(
 
     total_latency_ms = int((time.monotonic() - start) * 1000)
     effective_ttft_ms = ttft_ms if ttft_ms is not None else total_latency_ms
+
+    if on_done is not None:
+        on_done(final_answer, effective_ttft_ms, total_latency_ms)
 
     done_payload = final_answer.model_dump()
     done_payload["ttft_ms"] = effective_ttft_ms

@@ -9,7 +9,7 @@ for the project's single most emphasized requirement
 `element_id` would silently produce a citation pointing at the wrong
 page/element.
 
-Two responsibilities, always run together on every turn's final answer
+Three responsibilities, always run together on every turn's final answer
 before it is sent in the `done` SSE event (`app/api/v1/chat.py`, C2.4):
 
 1. **Strip invalid markers.** Any `{{el:ID}}` in `answer.answer` whose `ID`
@@ -19,10 +19,33 @@ before it is sent in the `done` SSE event (`app/api/v1/chat.py`, C2.4):
    left untouched, only the marker substring itself is deleted. Every
    removal is logged as an anomaly (observability,
    `01-architecture-overview.md` §5), never silently dropped.
-2. **Backfill citations.** Every marker that *does* survive validation is
+2. **Validate `citations[]` against the same whitelist (F2-02).** The
+   marker gate above only ever covered `{{el:ID}}` references inside
+   `answer.answer` — `answer.citations` (the model's own structured
+   output field) was never checked at all, so a model could emit e.g.
+   ``Citation(element_id="Revision History", page=282, element_type="section")``
+   for an element it never actually retrieved, and it would sail straight
+   through to the user (`Documentation/qa-reports/phase-2-qa-report.md`
+   F2-02/F2-03 — this exact scenario was observed producing 2 fabricated
+   citations for a question entirely outside the VRF/VRV domain). Same
+   philosophy as layer 3 above ("model mengusulkan id, backend memutuskan
+   sisanya"): any citation whose `element_id` does not resolve to an
+   integer present in `context.elements_by_id` is dropped outright: every
+   citation that survives has its `document_id`/`page`/`element_type`/
+   `image_uri`/`visual_description` **overwritten** from the authoritative
+   `ContextElement` — the model's own values for those fields are never
+   trusted, only `element_id` (the proposal) and `quote` (a free-text
+   excerpt, not positional/type metadata) are kept as given. This directly
+   fixes F2-03 too, as a pure consequence: `enforce_never_invent_safety_net`
+   below (unchanged) inspects `answer.citations` *after* this validation
+   runs (see `app/agent/vrf_agent.py::run_agent_turn`'s call order), so a
+   turn that only ever had fabricated citations now correctly ends up with
+   an empty `citations` list by the time the safety net looks at it.
+3. **Backfill citations.** Every marker that *does* survive validation is
    guaranteed a matching `Citation` entry (`element_id` matches) — created
    automatically from the context element's metadata if the LLM didn't
-   already include one in its structured `citations` output.
+   already include one (post-validation) in its structured `citations`
+   output.
 """
 
 from __future__ import annotations
@@ -45,6 +68,11 @@ class PostProcessResult:
     answer: TechnicalAnswer
     stripped_element_ids: tuple[int, ...]
     backfilled_element_ids: tuple[int, ...]
+    # F2-02 — `citations[]` entries dropped because their `element_id` did
+    # not resolve to a whitelisted context element (raw string as the model
+    # sent it, since a dropped id may not even be numeric, e.g.
+    # "Revision History").
+    dropped_citation_ids: tuple[str, ...]
 
 
 def _strip_marker(text: str, element_id: int) -> str:
@@ -64,10 +92,56 @@ def _citation_from_context_element(element: ContextElement) -> Citation:
     )
 
 
+def _resolve_context_element(element_id: str, context: BuiltContext) -> ContextElement | None:
+    """Resolve a model-proposed `Citation.element_id` (always a `str` in the
+    schema) to the authoritative `ContextElement` for this turn, or `None` if
+    it is not a legitimate reference — either because it is not even an
+    integer (e.g. `"Revision History"`, `"3.51"`, both observed from a real
+    model in QA) or because it is an integer that was never actually
+    retrieved this turn (whitelist miss)."""
+    try:
+        parsed = int(element_id)
+    except (TypeError, ValueError):
+        return None
+    return context.elements_by_id.get(parsed)
+
+
+def _validate_and_normalize_citations(
+    citations: list[Citation], context: BuiltContext
+) -> tuple[list[Citation], tuple[str, ...]]:
+    """F2-02 gate — see module docstring point 2. Never trust `citations[]`
+    as sent by the model: drop anything outside this turn's whitelist, and
+    overwrite every positional/type field on what survives from the
+    authoritative `ContextElement` (`quote` is the one field left as the
+    model provided it — it is free text, not something the backend has an
+    authoritative value for)."""
+    validated: list[Citation] = []
+    dropped_ids: list[str] = []
+    for citation in citations:
+        element = _resolve_context_element(citation.element_id, context)
+        if element is None:
+            dropped_ids.append(citation.element_id)
+            continue
+        is_visual = element.element_type in VISUAL_ELEMENT_TYPES
+        validated.append(
+            citation.model_copy(
+                update={
+                    "document_id": str(element.document_id),
+                    "page": element.page or 0,
+                    "element_type": element.element_type,
+                    "image_uri": element.image_uri if is_visual else None,
+                    "visual_description": element.visual_description if is_visual else None,
+                }
+            )
+        )
+    return validated, tuple(dropped_ids)
+
+
 def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostProcessResult:
-    """Apply the non-negotiable marker-validation gate to `answer` (produced
+    """Apply the two non-negotiable deterministic gates to `answer` (produced
     by the agent this turn) against `context` (everything retrieved/shown to
-    the LLM this turn, from every tool call).
+    the LLM this turn, from every tool call): §5.1 layer-3 marker validation,
+    and F2-02 citation validation/normalization.
     """
     valid_element_ids = set(context.elements_by_id.keys())
     found_element_ids = {int(match) for match in MARKER_PATTERN.findall(answer.answer)}
@@ -85,8 +159,17 @@ def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostPr
             extra={"element_ids": sorted(invalid_element_ids)},
         )
 
-    existing_by_element_id = {citation.element_id: citation for citation in answer.citations}
-    citations = list(answer.citations)
+    validated_citations, dropped_citation_ids = _validate_and_normalize_citations(
+        answer.citations, context
+    )
+    if dropped_citation_ids:
+        logger.warning(
+            "agent.answer.invalid_citation_dropped",
+            extra={"element_ids": dropped_citation_ids},
+        )
+
+    existing_by_element_id = {citation.element_id: citation for citation in validated_citations}
+    citations = list(validated_citations)
     backfilled_element_ids: list[int] = []
     for element_id in sorted(surviving_element_ids):
         key = str(element_id)
@@ -100,6 +183,7 @@ def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostPr
         answer=updated_answer,
         stripped_element_ids=tuple(sorted(invalid_element_ids)),
         backfilled_element_ids=tuple(backfilled_element_ids),
+        dropped_citation_ids=dropped_citation_ids,
     )
 
 
@@ -129,6 +213,31 @@ def enforce_never_invent_safety_net(
     up with zero citations, yet did not already mark itself refused. A
     no-tool-call conversational turn (small talk, clarifying question) is
     left untouched.
+
+    **Known limitation, flagged for the next Q2.1 re-run (not fixed here)**:
+    `search_documents` (`app/retrieval/hybrid_search.py`) has no relevance
+    score threshold — Qdrant RRF fusion returns its top-`k` nearest chunks
+    for *any* query text against a non-empty collection, so once real
+    documents are indexed `any_chunks_retrieved` will normally be `True`
+    even for a completely out-of-domain question (e.g. QA's "capital of
+    France" repro), not just for a genuinely broken/empty index. F2-02's
+    citation validation (above) still removes any fabricated
+    `citations[]` entries in that case, but this specific gate will only
+    additionally force `refused=True` if `any_chunks_retrieved` was in
+    fact `False` for that turn (e.g. circuit breaker triggered, or a
+    `chunk_type` filter matched nothing) — it is not, by itself, a general
+    relevance filter. Loosening this condition to ignore
+    `any_chunks_retrieved` entirely was deliberately NOT done here: it
+    would also force `refused=True` for legitimate in-scope answers that
+    correctly used retrieved `table`/`paragraph`/`procedure` content
+    without needing an inline `{{el:ID}}` marker or an explicit citation
+    (see `test_safety_net_tool_called_and_chunks_retrieved_not_forced`,
+    which encodes that this is intentional, not an oversight) — trading a
+    confirmed BLOCKER (fabricated citations) for a new, broader
+    over-refusal failure mode is not a safe unilateral substitution.
+    Whether a genuine relevance-threshold signal is needed here is a
+    retrieval-quality/budget question for System Analyst, not an
+    implementation bug in this module — see this branch's STATUS REPORT.
     """
     if answer.refused:
         return answer

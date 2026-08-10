@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.usage import UsageLimits
 
 from app.agent.answer_postprocess import enforce_never_invent_safety_net, postprocess_answer
 from app.agent.context_builder import BuiltContext
@@ -90,6 +91,22 @@ electrical hazard, high voltage, stored capacitor charge, or refrigerant \
 safety; use `severity="note"` for everything else (e.g. "consult a \
 different chapter for X").
 """
+
+
+# F2-06 (`Documentation/qa-reports/phase-2-qa-report.md`) — one observed turn
+# reached 51 sequential LLM round-trips/95 seconds before hitting
+# `pydantic_ai`'s own *default* `UsageLimits.request_limit` (50), which was
+# never overridden at all. QA's recommended range is 6-8; 8 is used here
+# (also the ceiling of that range, since `tool_search_error_code` alone can
+# internally trigger 2 round-trips worth of work for one LLM-visible tool
+# call). This is a request-count *ceiling* — `agent.run`/`agent.run_stream`
+# still return/complete normally well under it for the vast majority of
+# turns; it only bounds the pathological/looping case, and does so via
+# `pydantic_ai`'s own `UsageLimitExceeded` (a `pydantic_ai.exceptions.
+# AgentRunError`) rather than silent truncation, so callers (C2.4
+# `app/agent/streaming.py`) can handle it as an explicit, distinguishable
+# error case rather than a generic exception.
+DEFAULT_MAX_REQUESTS_PER_TURN = 8
 
 
 def _dynamic_instructions(ctx: RunContext[AgentDeps]) -> str:
@@ -202,6 +219,7 @@ async def run_agent_turn(
     *,
     message_history: Sequence[ModelMessage] | None = None,
     model: Model | KnownModelName | str | None = None,
+    usage_limits: UsageLimits | None = None,
 ) -> TechnicalAnswer:
     """Non-streaming turn orchestration: run the agent, then apply the two
     mandatory deterministic post-generation gates (§5.1 layer 3 marker
@@ -215,8 +233,22 @@ async def run_agent_turn(
     `model_override` field in the `/api/v1/chat`/`/api/v1/chat/stream`
     request body (`05-streaming-and-api-contract.md` §6) and lets tests
     substitute a `TestModel`/`FunctionModel` without touching `build_agent`.
+
+    `usage_limits`: F2-06 round-trip cap — defaults to
+    `UsageLimits(request_limit=DEFAULT_MAX_REQUESTS_PER_TURN)` when omitted;
+    callers (`app/api/v1/chat.py`, C2.4) may override e.g. from
+    `Settings.CHAT_LLM_MAX_REQUESTS_PER_TURN`.
     """
-    result = await agent.run(user_message, deps=deps, message_history=message_history, model=model)
+    effective_usage_limits = usage_limits or UsageLimits(
+        request_limit=DEFAULT_MAX_REQUESTS_PER_TURN
+    )
+    result = await agent.run(
+        user_message,
+        deps=deps,
+        message_history=message_history,
+        model=model,
+        usage_limits=effective_usage_limits,
+    )
     context = BuiltContext(elements_by_id=deps.context_elements)
     post_result = postprocess_answer(result.output, context)
     return enforce_never_invent_safety_net(

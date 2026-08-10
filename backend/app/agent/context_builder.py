@@ -40,6 +40,7 @@ inline markers.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,9 +64,41 @@ ANNOTATABLE_CHUNK_TYPES = frozenset({"text", "procedure", "figure"})
 
 DEFAULT_MAX_CONTEXT_CHUNKS = 8
 
+# F2-07 (`Documentation/qa-reports/phase-2-qa-report.md`) — a single
+# `search_documents` tool result was observed at 17,000-50,558 characters
+# (~4,500-13,000 tokens) with `DEFAULT_MAX_CONTEXT_CHUNKS` chunks sent at
+# full `content_text` length, which alone exceeds `gpt-3.5-turbo`'s 16,385
+# token window (`context_length_exceeded` from the provider). §3 point 1 of
+# `05-streaming-and-api-contract.md` only bounds chunk *count*, not size per
+# chunk — this bounds size too. 1,500 chars/chunk (QA's recommended figure)
+# keeps a worst-case `DEFAULT_MAX_CONTEXT_CHUNKS`-chunk result to roughly
+# 12,000 chars (~3,000 tokens), comfortably inside even the smallest
+# supported chat model's context window with headroom for the system
+# prompt/tool schemas/conversation history.
+DEFAULT_MAX_CHUNK_CHARS = 1500
+
+# Matches a `{{el:<digits>}}` marker that got cut short by truncation (e.g.
+# "...{{el:61" or "...{{el:6127}" with the final brace missing) — stripped
+# from a truncated chunk's tail so a partial marker is never handed to the
+# LLM as context (it would not match `MARKER_PATTERN` if copied verbatim,
+# but there is no reason to send a broken one at all).
+_TRAILING_PARTIAL_MARKER_PATTERN = re.compile(r"\{\{el:\d*\}?$")
+
 
 def build_marker(element_id: int) -> str:
     return f"{{{{el:{element_id}}}}}"
+
+
+def _truncate_chunk_text(text: str, max_chars: int) -> str:
+    """F2-07 per-chunk size cap — see `DEFAULT_MAX_CHUNK_CHARS` docstring.
+    `max_chars <= 0` disables truncation (treated as "no limit"), matching
+    how `max_chunks<=0`-style "unlimited" sentinels are usually spelled
+    elsewhere in this codebase."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars].rstrip()
+    truncated = _TRAILING_PARTIAL_MARKER_PATTERN.sub("", truncated)
+    return f"{truncated} …[truncated]"
 
 
 @dataclass(slots=True)
@@ -132,9 +165,14 @@ def fetch_context_elements(db: Session, element_ids: list[int]) -> dict[int, Con
     }
 
 
-def _annotate_chunk_text(chunk: RetrievedChunk, elements_by_id: dict[int, ContextElement]) -> str:
+def _annotate_chunk_text(
+    chunk: RetrievedChunk,
+    elements_by_id: dict[int, ContextElement],
+    *,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+) -> str:
     if chunk.chunk_type not in ANNOTATABLE_CHUNK_TYPES:
-        return chunk.content_text
+        return _truncate_chunk_text(chunk.content_text, max_chunk_chars)
 
     parts: list[str] = []
     for element_id in chunk.element_ids:
@@ -146,7 +184,8 @@ def _annotate_chunk_text(chunk: RetrievedChunk, elements_by_id: dict[int, Contex
         if element.text:
             parts.append(element.text)
 
-    return "\n".join(parts) if parts else chunk.content_text
+    annotated = "\n".join(parts) if parts else chunk.content_text
+    return _truncate_chunk_text(annotated, max_chunk_chars)
 
 
 def _format_chunk_header(chunk: RetrievedChunk) -> str:
@@ -164,12 +203,15 @@ def build_context(
     retrieved_chunks: list[RetrievedChunk],
     *,
     max_chunks: int = DEFAULT_MAX_CONTEXT_CHUNKS,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
 ) -> BuiltContext:
     """Build the marker-annotated context text sent to the LLM for one tool
     call's retrieval results — per `05-streaming-and-api-contract.md` §3
     point 1 ("Batasi context yang dikirim ke LLM ... 6-10 chunk paling
     relevan"), only the top `max_chunks` (already ranked by
-    `search_documents`'s RRF fusion) are included.
+    `search_documents`'s RRF fusion) are included. `max_chunk_chars` (F2-07)
+    additionally bounds each individual chunk's *size*, not just the count —
+    see `DEFAULT_MAX_CHUNK_CHARS` docstring.
     """
     selected = retrieved_chunks[:max_chunks]
     all_element_ids = sorted({element_id for c in selected for element_id in c.element_ids})
@@ -178,7 +220,9 @@ def build_context(
     context_chunks: list[ContextChunk] = []
     formatted_sections: list[str] = []
     for chunk in selected:
-        annotated_text = _annotate_chunk_text(chunk, elements_by_id)
+        annotated_text = _annotate_chunk_text(
+            chunk, elements_by_id, max_chunk_chars=max_chunk_chars
+        )
         context_chunks.append(
             ContextChunk(
                 chunk_id=chunk.chunk_id,

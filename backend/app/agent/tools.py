@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent.context_builder import (
+    DEFAULT_MAX_CHUNK_CHARS,
     MARKER_ELEMENT_TYPES,
     BuiltContext,
     ContextElement,
@@ -81,6 +82,9 @@ class AgentDeps:
     model_family: str | None = None
     default_top_k: int = 20
     max_context_chunks: int = 8
+    # F2-07 — per-chunk character cap threaded into every `build_context`
+    # call below; see `app/agent/context_builder.py` `DEFAULT_MAX_CHUNK_CHARS`.
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS
     circuit_breaker_seconds: float = 8.0
     known_entities: KnownEntities | None = None
     # Running whitelist merged across every tool call this turn — see
@@ -130,7 +134,12 @@ def tool_search_documents(
         top_k=top_k or deps.default_top_k,
         circuit_breaker_seconds=deps.circuit_breaker_seconds,
     )
-    context = build_context(deps.db, result.chunks, max_chunks=deps.max_context_chunks)
+    context = build_context(
+        deps.db,
+        result.chunks,
+        max_chunks=deps.max_context_chunks,
+        max_chunk_chars=deps.max_chunk_chars,
+    )
     _merge_context(deps, context)
     return _render_context_or_message(
         context, circuit_breaker_triggered=result.circuit_breaker_triggered
@@ -224,7 +233,12 @@ def tool_find_troubleshooting_procedure(
         top_k=deps.default_top_k,
         circuit_breaker_seconds=deps.circuit_breaker_seconds,
     )
-    context = build_context(deps.db, procedure_result.chunks, max_chunks=deps.max_context_chunks)
+    context = build_context(
+        deps.db,
+        procedure_result.chunks,
+        max_chunks=deps.max_context_chunks,
+        max_chunk_chars=deps.max_chunk_chars,
+    )
     _merge_context(deps, context)
     if context.chunks:
         return context.context_text
@@ -253,7 +267,12 @@ def tool_find_wiring_diagram(
         top_k=deps.default_top_k,
         circuit_breaker_seconds=deps.circuit_breaker_seconds,
     )
-    context = build_context(deps.db, result.chunks, max_chunks=deps.max_context_chunks)
+    context = build_context(
+        deps.db,
+        result.chunks,
+        max_chunks=deps.max_context_chunks,
+        max_chunk_chars=deps.max_chunk_chars,
+    )
     _merge_context(deps, context)
     return _render_context_or_message(
         context, circuit_breaker_triggered=result.circuit_breaker_triggered

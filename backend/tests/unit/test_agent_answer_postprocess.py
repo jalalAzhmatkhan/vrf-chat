@@ -134,6 +134,118 @@ def test_postprocess_answer_element_page_none_defaults_to_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# postprocess_answer — F2-02 citations[] whitelist validation
+# ---------------------------------------------------------------------------
+
+
+def test_postprocess_answer_citation_with_nonexistent_element_id_dropped() -> None:
+    context = BuiltContext(elements_by_id={})
+    fabricated = Citation(
+        document_id="3", page=282, element_id="Revision History", element_type="section"
+    )
+    answer = TechnicalAnswer(
+        answer="The capital city of France is Paris.",
+        confidence=1.0,
+        citations=[fabricated],
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.citations == []
+    assert result.dropped_citation_ids == ("Revision History",)
+
+
+def test_postprocess_answer_citation_with_non_numeric_element_id_dropped() -> None:
+    context = BuiltContext(elements_by_id={1: _element(1)})
+    fabricated = Citation(document_id="3", page=9, element_id="3.51", element_type="paragraph")
+    answer = TechnicalAnswer(answer="See the manual.", confidence=0.7, citations=[fabricated])
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.citations == []
+    assert result.dropped_citation_ids == ("3.51",)
+
+
+def test_postprocess_answer_citation_metadata_overwritten_from_context() -> None:
+    # Element 6127 is really an icon on page 133 — the model sends wrong
+    # page/type (mirrors the exact QA repro: model claimed page=60/"text").
+    element = _element(6127, element_type="icon", image_uri="s3://bucket/icon.png", page=133)
+    context = BuiltContext(elements_by_id={6127: element})
+    wrong_metadata_citation = Citation(
+        document_id="999", page=60, element_id="6127", element_type="text", quote="model's quote"
+    )
+    answer = TechnicalAnswer(
+        answer="Press the button.", confidence=0.9, citations=[wrong_metadata_citation]
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert len(result.answer.citations) == 1
+    citation = result.answer.citations[0]
+    assert citation.document_id == "3"
+    assert citation.page == 133
+    assert citation.element_type == "icon"
+    assert citation.image_uri == "s3://bucket/icon.png"
+    # `quote` is the one field left as the model provided it.
+    assert citation.quote == "model's quote"
+    assert result.dropped_citation_ids == ()
+
+
+def test_postprocess_answer_citations_mixed_valid_and_fabricated() -> None:
+    element = _element(7814, element_type="figure", page=276)
+    context = BuiltContext(elements_by_id={7814: element})
+    valid = Citation(document_id="3", page=276, element_id="7814", element_type="figure")
+    fabricated = Citation(document_id="3", page=282, element_id="99999", element_type="section")
+    answer = TechnicalAnswer(
+        answer="See the wiring diagram.",
+        confidence=0.85,
+        citations=[valid, fabricated],
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert len(result.answer.citations) == 1
+    assert result.answer.citations[0].element_id == "7814"
+    assert result.dropped_citation_ids == ("99999",)
+
+
+def test_postprocess_answer_out_of_scope_repro_ends_with_no_citations() -> None:
+    """Deterministic reproduction of the exact QA repro (phase-2-qa-report.md
+    F2-02/F2-03): an out-of-scope question answered with 2 fabricated
+    citations to real-looking pages must end up with zero citations after
+    validation — which is what lets `enforce_never_invent_safety_net` (F2-03)
+    correctly see "no legitimate evidence" once this runs first."""
+    context = BuiltContext(elements_by_id={})
+    answer = TechnicalAnswer(
+        answer=(
+            "The capital city of France is Paris. The winner of the 2018 FIFA "
+            "World Cup was France."
+        ),
+        confidence=1.0,
+        citations=[
+            Citation(
+                document_id="3", page=282, element_id="Revision History", element_type="section"
+            ),
+            Citation(document_id="3", page=286, element_id="13", element_type="paragraph"),
+        ],
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.citations == []
+    assert set(result.dropped_citation_ids) == {"Revision History", "13"}
+
+
+def test_postprocess_answer_no_citations_no_markers_dropped_ids_empty() -> None:
+    context = BuiltContext(elements_by_id={})
+    answer = TechnicalAnswer(answer="Just plain text.", confidence=0.8)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.dropped_citation_ids == ()
+
+
+# ---------------------------------------------------------------------------
 # enforce_never_invent_safety_net
 # ---------------------------------------------------------------------------
 

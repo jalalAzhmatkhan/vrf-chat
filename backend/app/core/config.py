@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     CHAT_LLM_TEMPERATURE: float = 0.1
     CHAT_LLM_MAX_TOKENS: int = 4096
     CHAT_LLM_TIMEOUT_SECONDS: int = 25
+    # F2-06 [phase-2-qa-report.md] — bounds `UsageLimits.request_limit` on
+    # every agent turn (`app/agent/vrf_agent.py::run_agent_turn`). Without an
+    # explicit value here, `pydantic_ai`'s own default (50) applies — QA
+    # observed one turn reach 51 round-trips/95s before that default finally
+    # kicked in. 8 is QA's recommended ceiling (range 6-8).
+    CHAT_LLM_MAX_REQUESTS_PER_TURN: int = 8
 
     EVAL_JUDGE_LLM_PROVIDER: Literal["anthropic", "google", "openai", "local"] = "google"
     EVAL_JUDGE_LLM_MODEL: str = "gemini-2.5-pro"
@@ -250,6 +256,14 @@ class Settings(BaseSettings):
     # result instead of blocking the rest of the TTFT budget. ----
     RETRIEVAL_CIRCUIT_BREAKER_SECONDS: float = 8.0
     RETRIEVAL_DEFAULT_TOP_K: int = 20
+
+    # ---- Agent context builder (C2.3), see
+    # Documentation/system-design/05-streaming-and-api-contract.md §3 point 1
+    # and app/agent/context_builder.py. F2-06/F2-07
+    # [phase-2-qa-report.md] — a single search_documents tool result was
+    # observed at 17,000-50,558 chars (well past gpt-3.5-turbo's 16,385-token
+    # window) because §3 point 1 only bounds chunk *count*, not size. ----
+    CONTEXT_BUILDER_MAX_CHUNK_CHARS: int = 1500
 
     # ---- Ingestion Stage: chunk embedding (I1.8), see
     # Documentation/system-design/03-retrieval-chunking.md §6. fastembed

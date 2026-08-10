@@ -308,3 +308,77 @@ def test_build_context_empty_chunks_list() -> None:
     assert context.chunks == []
     assert context.context_text == ""
     assert context.elements_by_id == {}
+
+
+# ---------------------------------------------------------------------------
+# _truncate_chunk_text / build_context max_chunk_chars — F2-07
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_chunk_text_under_limit_unchanged() -> None:
+    assert cb._truncate_chunk_text("short text", 1500) == "short text"
+
+
+def test_truncate_chunk_text_over_limit_truncated_with_marker() -> None:
+    text = "x" * 2000
+    result = cb._truncate_chunk_text(text, 1500)
+    assert len(result) < 2000
+    assert result.startswith("x" * 1500)
+    assert result.endswith("…[truncated]")
+
+
+def test_truncate_chunk_text_zero_or_negative_disables_truncation() -> None:
+    text = "x" * 2000
+    assert cb._truncate_chunk_text(text, 0) == text
+    assert cb._truncate_chunk_text(text, -1) == text
+
+
+def test_truncate_chunk_text_strips_trailing_partial_marker() -> None:
+    # Truncation lands mid-marker ("...{{el:61") — the incomplete marker
+    # tail must not be sent to the LLM.
+    text = "prefix " + "y" * 10 + "{{el:6127}}" + "z" * 100
+    result = cb._truncate_chunk_text(text, 20)
+    assert "{{el:" not in result
+    assert result.endswith("…[truncated]")
+
+
+def test_build_context_table_chunk_content_text_truncated() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    table = _make_element(db, page, document, element_type="table", text="ignored")
+    long_text = "row " * 1000  # 5000 chars, well over the 1500 default cap
+
+    chunk = _chunk(
+        1,
+        document_id=document.id,
+        chunk_type="table",
+        element_ids=[table.id],
+        content_text=long_text,
+    )
+    context = cb.build_context(db, [chunk])
+
+    assert len(context.chunks[0].annotated_text) < len(long_text)
+    assert context.chunks[0].annotated_text.endswith("…[truncated]")
+
+
+def test_build_context_annotated_text_chars_truncated() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    element = _make_element(db, page, document, element_type="paragraph", text="word " * 500)
+
+    chunk = _chunk(1, document_id=document.id, chunk_type="text", element_ids=[element.id])
+    context = cb.build_context(db, [chunk], max_chunk_chars=100)
+
+    assert len(context.chunks[0].annotated_text) < 200
+    assert context.chunks[0].annotated_text.endswith("…[truncated]")
+
+
+def test_build_context_max_chunk_chars_zero_disables_truncation() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    element = _make_element(db, page, document, element_type="paragraph", text="word " * 500)
+
+    chunk = _chunk(1, document_id=document.id, chunk_type="text", element_ids=[element.id])
+    context = cb.build_context(db, [chunk], max_chunk_chars=0)
+
+    assert "…[truncated]" not in context.chunks[0].annotated_text

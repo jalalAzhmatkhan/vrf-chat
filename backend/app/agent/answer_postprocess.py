@@ -32,8 +32,9 @@ before it is sent in the `done` SSE event (`app/api/v1/chat.py`, C2.4):
    sisanya"): any citation whose `element_id` does not resolve to an
    integer present in `context.elements_by_id` is dropped outright: every
    citation that survives has its `document_id`/`page`/`element_type`/
-   `image_uri`/`visual_description` **overwritten** from the authoritative
-   `ContextElement` — the model's own values for those fields are never
+   `image_uri`/`visual_description`/`content_structured` (§5.2.1, F2-10)
+   **overwritten** from the authoritative `ContextElement` — the model's
+   own values for those fields are never
    trusted, only `element_id` (the proposal) and `quote` (a free-text
    excerpt, not positional/type metadata) are kept as given. This directly
    fixes F2-03 too, as a pure consequence: `enforce_never_invent_safety_net`
@@ -81,6 +82,7 @@ def _strip_marker(text: str, element_id: int) -> str:
 
 def _citation_from_context_element(element: ContextElement) -> Citation:
     is_visual = element.element_type in VISUAL_ELEMENT_TYPES
+    is_table = element.element_type == "table"
     return Citation(
         document_id=str(element.document_id),
         page=element.page or 0,
@@ -89,6 +91,7 @@ def _citation_from_context_element(element: ContextElement) -> Citation:
         quote=element.text,
         image_uri=element.image_uri if is_visual else None,
         visual_description=element.visual_description if is_visual else None,
+        content_structured=element.content_structured if is_table else None,
     )
 
 
@@ -123,6 +126,7 @@ def _validate_and_normalize_citations(
             dropped_ids.append(citation.element_id)
             continue
         is_visual = element.element_type in VISUAL_ELEMENT_TYPES
+        is_table = element.element_type == "table"
         validated.append(
             citation.model_copy(
                 update={
@@ -131,6 +135,7 @@ def _validate_and_normalize_citations(
                     "element_type": element.element_type,
                     "image_uri": element.image_uri if is_visual else None,
                     "visual_description": element.visual_description if is_visual else None,
+                    "content_structured": element.content_structured if is_table else None,
                 }
             )
         )

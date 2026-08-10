@@ -40,6 +40,7 @@ inline markers.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,6 +114,16 @@ class ContextElement:
     visual_description: dict[str, Any] | None
     document_id: int
     page: int | None
+    # F2-10/§5.2.1 — only ever populated for element_type == "table", sourced
+    # from the owning chunk's `content_structured` (see `build_context`,
+    # which is the only place with both the element and its chunk in memory
+    # at once). `None` for every other element type, and also `None` here
+    # for a table element reached via a path that never went through
+    # `build_context` (`app/agent/tools.py` `tool_get_figure`/
+    # `tool_get_document_page`/`_exact_error_code_lookup` fetch elements
+    # directly, without a chunk) — `GET /api/v1/elements/{id}` remains the
+    # authoritative full-data fallback for those cases (§5.2.1).
+    content_structured: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -188,6 +199,56 @@ def _annotate_chunk_text(
     return _truncate_chunk_text(annotated, max_chunk_chars)
 
 
+# §5.2.1 (F2-10) safety cap — the current corpus never approaches these
+# (max ~5KB/60 rows observed), but this guards the 6 not-yet-ingested source
+# documents. `GET /api/v1/elements/{element_id}` remains the un-truncated
+# full-data fallback regardless of what a citation payload carries.
+CONTENT_STRUCTURED_MAX_ROWS = 200
+CONTENT_STRUCTURED_MAX_BYTES = 50_000
+CONTENT_STRUCTURED_TRUNCATED_ROW_COUNT = 100
+
+
+def cap_content_structured_for_citation(content_structured: dict[str, Any]) -> dict[str, Any]:
+    """§5.2.1: if a table's `content_structured` exceeds
+    `CONTENT_STRUCTURED_MAX_ROWS` rows or `CONTENT_STRUCTURED_MAX_BYTES`
+    serialized, truncate to `CONTENT_STRUCTURED_TRUNCATED_ROW_COUNT` rows and
+    mark `truncated: true` — for the quick `Citation` payload only. Never
+    mutates a `content_structured` that fits."""
+    rows = content_structured.get("rows")
+    if not isinstance(rows, list) or len(rows) == 0:
+        return content_structured
+    serialized_bytes = len(json.dumps(content_structured, default=str))
+    within_row_limit = len(rows) <= CONTENT_STRUCTURED_MAX_ROWS
+    within_byte_limit = serialized_bytes <= CONTENT_STRUCTURED_MAX_BYTES
+    if within_row_limit and within_byte_limit:
+        return content_structured
+    return {
+        **content_structured,
+        "rows": rows[:CONTENT_STRUCTURED_TRUNCATED_ROW_COUNT],
+        "truncated": True,
+    }
+
+
+def _table_content_structured_by_element_id(
+    chunks: list[RetrievedChunk],
+) -> dict[int, dict[str, Any]]:
+    """§5.2.1 — the mapping element_id -> owning table chunk's
+    `content_structured`, built from chunk objects already loaded for this
+    tool call (no extra query, per the design doc's "sudah punya objek
+    chunk tsb di memori" rationale). Verified 1:1 for the vast majority of
+    real table chunks (152/157); for the rare element_id shared by 2 chunks,
+    the last chunk in iteration order wins — an arbitrary but harmless tie-
+    break (both are valid data for the same element)."""
+    result: dict[int, dict[str, Any]] = {}
+    for chunk in chunks:
+        if chunk.chunk_type != "table" or not chunk.content_structured:
+            continue
+        capped = cap_content_structured_for_citation(chunk.content_structured)
+        for element_id in chunk.element_ids:
+            result[element_id] = capped
+    return result
+
+
 def _format_chunk_header(chunk: RetrievedChunk) -> str:
     section = " > ".join(chunk.section_path) if chunk.section_path else ""
     pages = (
@@ -216,6 +277,14 @@ def build_context(
     selected = retrieved_chunks[:max_chunks]
     all_element_ids = sorted({element_id for c in selected for element_id in c.element_ids})
     elements_by_id = fetch_context_elements(db, all_element_ids)
+
+    # F2-10/§5.2.1 — attach content_structured to table elements from the
+    # chunk objects already in `selected` (see helper docstring).
+    content_structured_by_element_id = _table_content_structured_by_element_id(selected)
+    for element_id, content_structured in content_structured_by_element_id.items():
+        element = elements_by_id.get(element_id)
+        if element is not None and element.element_type == "table":
+            element.content_structured = content_structured
 
     context_chunks: list[ContextChunk] = []
     formatted_sections: list[str] = []

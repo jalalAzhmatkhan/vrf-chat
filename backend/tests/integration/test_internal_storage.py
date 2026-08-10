@@ -18,7 +18,9 @@ def test_get_local_storage_object_serves_bytes(tmp_path) -> None:
     settings = _settings(tmp_path)
     client_lib = LocalFilesystemStorageClient(settings)
     uri = client_lib.put_object("icons/reset.png", b"icon-bytes", "image/png")
-    token = client_lib.get_presigned_url(uri).removeprefix("/internal/local-storage/")
+    # F2-11: get_presigned_url now returns an absolute URL — only the path
+    # portion after "/internal/local-storage/" is the token.
+    token = client_lib.get_presigned_url(uri).rsplit("/internal/local-storage/", 1)[-1]
 
     app = create_app(settings)
     client = TestClient(app)

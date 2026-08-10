@@ -44,12 +44,29 @@ def test_presigned_url_token_roundtrip(tmp_path) -> None:
 
     url = client.get_presigned_url(uri, expires_in_seconds=60)
 
-    assert url.startswith("/internal/local-storage/")
-    token = url.removeprefix("/internal/local-storage/")
+    # F2-11: absolute URL (default APP_PUBLIC_BASE_URL), not just a path
+    # relative to whatever origin happens to resolve it (see local_adapter.py
+    # module docstring).
+    assert url.startswith("http://localhost:8000/internal/local-storage/")
+    token = url.removeprefix("http://localhost:8000/internal/local-storage/")
 
     data, content_type = client.resolve_token(token)
     assert data == b"icon-bytes"
     assert content_type == "image/png"
+
+
+def test_presigned_url_uses_configured_public_base_url(tmp_path) -> None:
+    client = LocalFilesystemStorageClient(
+        _settings(tmp_path, APP_PUBLIC_BASE_URL="https://api.example.com/")
+    )
+    uri = client.put_object("icons/reset.png", b"icon-bytes", "image/png")
+
+    url = client.get_presigned_url(uri, expires_in_seconds=60)
+
+    # Trailing slash on the configured base URL must not produce a double
+    # slash before the path.
+    assert url.startswith("https://api.example.com/internal/local-storage/")
+    assert "//internal" not in url
 
 
 def test_resolve_token_defaults_content_type_when_no_metadata(tmp_path) -> None:

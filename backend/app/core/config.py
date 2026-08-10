@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     API_V1_PREFIX: str = "/api/v1"
+    # F2-11 [phase-2-qa-report.md] — the backend is the only party that knows
+    # its own publicly-reachable base URL; used by
+    # LocalFilesystemStorageClient.get_presigned_url (app/storage/local_adapter.py)
+    # to return an ABSOLUTE URL instead of a path relative to the FE's own
+    # origin (the previous "/internal/local-storage/{token}" resolved against
+    # http://localhost:5173 in the browser, not the backend, so every page
+    # image/icon crop 404'd). Only consumed when OBJECT_STORAGE_BACKEND=local
+    # — MinIO/S3 presigned URLs are absolute natively, see s3_adapter.py.
+    APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 
     # CORS — single-tenant app, explicit allow-list required (never wildcard).
     # `NoDecode`: disables pydantic-settings' default JSON-decode-then-validate

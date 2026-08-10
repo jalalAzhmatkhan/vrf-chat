@@ -9,6 +9,16 @@ and embedded in a URL pointing at the internal route
 so the contract's return type (a directly-usable URL string) stays
 consistent across every backend for the frontend.
 
+**F2-11** (`Documentation/qa-reports/phase-2-qa-report.md`): the returned URL
+is made ABSOLUTE (prefixed with `Settings.APP_PUBLIC_BASE_URL`), not just a
+path. A path-only URL is only ever "relative" in the sense that matters once
+a *different* origin (the FE dev server, `http://localhost:5173`) resolves
+it as `<img src>` — the browser resolves it against the page's own origin,
+not the backend's, so every page image/icon crop 404'd in QA's real-browser
+testing even though the backend route itself worked fine when hit directly.
+MinIO/S3 (`s3_adapter.py`) does not have this problem — real presigned URLs
+are absolute by construction.
+
 Canonical URI format: `file://{key}`.
 """
 
@@ -53,6 +63,8 @@ class LocalFilesystemStorageClient:
         self._base_path = Path(settings.OBJECT_STORAGE_LOCAL_BASE_PATH)
         self._base_path.mkdir(parents=True, exist_ok=True)
         self._token_secret = settings.OBJECT_STORAGE_LOCAL_TOKEN_SECRET
+        # F2-11 — see module docstring.
+        self._public_base_url = settings.APP_PUBLIC_BASE_URL.rstrip("/")
 
     def _resolve(self, key: str) -> Path:
         return self._base_path / key
@@ -71,7 +83,7 @@ class LocalFilesystemStorageClient:
     def get_presigned_url(self, uri: str, expires_in_seconds: int = 3600) -> str:
         key = self._key_from_uri(uri)
         token = self.issue_token(key, expires_in_seconds)
-        return f"/internal/local-storage/{token}"
+        return f"{self._public_base_url}/internal/local-storage/{token}"
 
     def delete_object(self, uri: str) -> None:
         key = self._key_from_uri(uri)

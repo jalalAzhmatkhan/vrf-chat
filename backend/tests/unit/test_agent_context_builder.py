@@ -382,3 +382,109 @@ def test_build_context_max_chunk_chars_zero_disables_truncation() -> None:
     context = cb.build_context(db, [chunk], max_chunk_chars=0)
 
     assert "…[truncated]" not in context.chunks[0].annotated_text
+
+
+# ---------------------------------------------------------------------------
+# cap_content_structured_for_citation / build_context table content_structured
+# — F2-10, §5.2.1
+# ---------------------------------------------------------------------------
+
+
+def test_cap_content_structured_small_table_unchanged() -> None:
+    content_structured = {"rows": [["a", "b"], ["c", "d"]]}
+    assert cb.cap_content_structured_for_citation(content_structured) is content_structured
+
+
+def test_cap_content_structured_no_rows_key_unchanged() -> None:
+    content_structured = {"caption": "no rows here"}
+    assert cb.cap_content_structured_for_citation(content_structured) is content_structured
+
+
+def test_cap_content_structured_empty_rows_unchanged() -> None:
+    content_structured = {"rows": []}
+    assert cb.cap_content_structured_for_citation(content_structured) is content_structured
+
+
+def test_cap_content_structured_over_row_limit_truncated() -> None:
+    content_structured = {"rows": [["r", i] for i in range(250)]}
+
+    result = cb.cap_content_structured_for_citation(content_structured)
+
+    assert len(result["rows"]) == cb.CONTENT_STRUCTURED_TRUNCATED_ROW_COUNT
+    assert result["truncated"] is True
+
+
+def test_cap_content_structured_over_byte_limit_truncated() -> None:
+    # Few rows, but each cell is huge -> exceeds the byte cap, not the row cap.
+    content_structured = {"rows": [["x" * 60_000]]}
+
+    result = cb.cap_content_structured_for_citation(content_structured)
+
+    assert result["truncated"] is True
+
+
+def test_build_context_table_element_gets_content_structured() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    table = _make_element(db, page, document, element_type="table", text="ignored")
+    content_structured = {"rows": [["Warning", "High voltage"]]}
+
+    chunk = _chunk(
+        1,
+        document_id=document.id,
+        chunk_type="table",
+        element_ids=[table.id],
+        content_text="| Warning | High voltage |",
+    )
+    chunk.content_structured = content_structured
+
+    context = cb.build_context(db, [chunk])
+
+    assert context.elements_by_id[table.id].content_structured == content_structured
+
+
+def test_build_context_table_chunk_without_content_structured_leaves_none() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    table = _make_element(db, page, document, element_type="table", text="ignored")
+
+    chunk = _chunk(
+        1, document_id=document.id, chunk_type="table", element_ids=[table.id], content_text="x"
+    )
+    assert chunk.content_structured is None
+
+    context = cb.build_context(db, [chunk])
+
+    assert context.elements_by_id[table.id].content_structured is None
+
+
+def test_build_context_table_chunk_element_id_not_a_real_element_skipped() -> None:
+    # A table chunk can reference an element_id with no matching `elements`
+    # row (deleted/never persisted) — must not raise, and simply has nothing
+    # to attach content_structured to.
+    db = _make_session()
+    document, _page = _seed_document_and_page(db)
+
+    chunk = _chunk(
+        1,
+        document_id=document.id,
+        chunk_type="table",
+        element_ids=[99999],
+        content_text="fallback",
+    )
+    chunk.content_structured = {"rows": [["a", "b"]]}
+
+    context = cb.build_context(db, [chunk])
+
+    assert context.elements_by_id == {}
+
+
+def test_build_context_non_table_element_never_gets_content_structured() -> None:
+    db = _make_session()
+    document, page = _seed_document_and_page(db)
+    para = _make_element(db, page, document, element_type="paragraph", text="hi")
+
+    chunk = _chunk(1, document_id=document.id, chunk_type="text", element_ids=[para.id])
+    context = cb.build_context(db, [chunk])
+
+    assert context.elements_by_id[para.id].content_structured is None

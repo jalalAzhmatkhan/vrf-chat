@@ -38,6 +38,11 @@ class Citation(BaseModel):
     # Populated only when element_type in VISUAL_ELEMENT_TYPES (§5.2).
     image_uri: str | None = None
     visual_description: dict[str, Any] | None = None
+    # BARU §5.2.1 (F2-10) — HANYA diisi jika element_type == "table"; shape
+    # matches chunks.content_structured (`{"rows": [...]}`), capped per the
+    # size limits documented in `app/agent/context_builder.py`
+    # `cap_content_structured_for_citation`.
+    content_structured: dict[str, Any] | None = None
 
 
 class Warning(BaseModel):

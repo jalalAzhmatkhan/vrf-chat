@@ -4,13 +4,20 @@ import { MessageList } from './components/MessageList';
 import { Composer } from './components/Composer';
 import { Button } from '../../components/Button/Button';
 import { listDocuments } from '../../lib/api/documentsApi';
+import { CitationViewerProvider } from '../citation-viewer/CitationViewerContext';
 import styles from './ChatPage.module.css';
 
 /**
  * Documentation/ui-ux-design/04-chat-ui.md §1, §16 `ChatPage`.
  * Route: `/chat` (routes/routes.jsx), rendered inside `AppShell`.
+ *
+ * Wrapped in `CitationViewerProvider` (C2.8,
+ * `05-citation-viewer.md` §2 — an overlay over this same page, not a
+ * separate route) so any descendant can open the panel via
+ * `useCitationViewer()` without prop-drilling through every intermediate
+ * component (`AssistantMessageCard` is the one that actually calls it).
  */
-export function ChatPage() {
+export function ChatPageInner() {
   const { messages, sendMessage, retryMessage, resetConversation, isStreamingActive } = useChatStream();
   const [documentsMap, setDocumentsMap] = useState(new Map());
   const [composerValue, setComposerValue] = useState('');
@@ -58,5 +65,13 @@ export function ChatPage() {
         onSubmit={sendMessage}
       />
     </div>
+  );
+}
+
+export function ChatPage() {
+  return (
+    <CitationViewerProvider>
+      <ChatPageInner />
+    </CitationViewerProvider>
   );
 }

@@ -1,0 +1,49 @@
+/* Documentation/ui-ux-design/05-citation-viewer.md §4 */
+
+.rect {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border-radius: var(--radius-sm);
+}
+
+.primary {
+  border: 2px solid var(--color-accent-cyan);
+  background: rgba(34, 211, 238, 0.12);
+}
+
+.context {
+  border: 1px solid var(--color-border-subtle);
+}
+
+.contextIcon {
+  border: 1px solid var(--color-border-subtle);
+  opacity: 0.4;
+}
+
+/* §4.1: one-time flash-highlight on open/citation-change, then settle to
+   the static state above — no continuous animation (Prinsip 3 Kategori B). */
+.flash {
+  animation: flash-highlight var(--duration-slow) var(--ease-decelerate);
+}
+
+@keyframes flash-highlight {
+  0% {
+    background: rgba(34, 211, 238, 0);
+    box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.25);
+  }
+  60% {
+    background: rgba(34, 211, 238, 0.12);
+    box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.25);
+  }
+  100% {
+    background: rgba(34, 211, 238, 0.12);
+    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flash {
+    animation: none;
+  }
+}

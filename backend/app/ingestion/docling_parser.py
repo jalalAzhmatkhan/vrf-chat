@@ -11,7 +11,9 @@ RTX 3060 6GB dev box — see `02-ingestion-pipeline.md` §4
 (`DOCLING_UNLOAD_BEFORE_PADDLE_STAGE`).
 
 Design notes:
-- `DOCLING_DEVICE` (`cuda` default in dev, `cpu` fallback) is validated
+- `DOCLING_DEVICE` (`cpu` default in dev as of `SA1.1`/2026-08-10 — see
+  `app/core/config.py`; `cuda` remains fully supported as an explicit
+  override) is validated
   fail-fast in `DoclingParser.__init__`, not at FastAPI app startup like the
   LLM/object-storage/DB providers (`04-provider-abstractions.md` DIRECT
   MESSAGE point 2) — Docling is only ever instantiated by the GPU ingestion
@@ -31,10 +33,27 @@ Design notes:
   `picture` items that are small relative to the page (see
   `_is_icon_sized`/`DOCLING_ICON_*`) are re-tagged `icon` (rather than
   `figure`, e.g. a full electrical schematic) and `parent_local_id` is set to
-  the most recently seen paragraph/list/heading element on the SAME page in
-  linear reading order (`doc.iterate_items()` — the same traversal that
-  backs Docling's own `export_to_markdown()`, so it reflects true reading
-  order, not raw insertion/detection order).
+  the most recently seen paragraph/list/heading element in linear reading
+  order (`doc.iterate_items()` — the same traversal that backs Docling's own
+  `export_to_markdown()`, so it reflects true reading order, not raw
+  insertion/detection order), preferring one on the SAME page but **falling
+  back to the most recent one anywhere earlier in the document** if the
+  current page has none yet.
+
+  **[SA1.2 finding, 2026-08-09 — real bug, fixed]** The original (I1.2)
+  version scoped this fallback strictly per-page
+  (`last_text_local_id_by_page.get(page_number)`, `None` if nothing
+  matched — no further fallback), which real data (document_id=3) showed
+  is too narrow: a page consisting entirely of icons continuing a legend
+  from the previous page (e.g. page 8 of Zeggo VRV IV REYQ, 6 icons, zero
+  paragraph/list/heading elements of its own, still the same "Pictograms"
+  `section_path` inherited from page 7's heading) left **all 163 icons on
+  such pages with `parent_id = NULL`** (61/163 = 37% doc-wide) — each one
+  became its own orphan `text` chunk with an EMPTY `content_text`,
+  unsearchable, defeating the entire point of parent-linking. The fix
+  tracks a second, document-wide "last text/heading element seen so far"
+  (`last_text_local_id_doc`) alongside the per-page one, and uses it as a
+  fallback when the current page has no text element of its own yet.
 """
 
 from __future__ import annotations
@@ -264,6 +283,7 @@ def map_document_to_elements(
     elements: list[ElementDraft] = []
     ref_to_local_id: dict[str, int] = {}
     last_text_local_id_by_page: dict[int, int] = {}
+    last_text_local_id_doc: int | None = None
     section_path: list[str] = []
     pending_caption_owner_by_ref: dict[str, str] = {}
     next_id = 1
@@ -290,6 +310,12 @@ def map_document_to_elements(
             ):
                 element_type = ELEMENT_TYPE_ICON
                 parent_local_id = last_text_local_id_by_page.get(page_number)
+                if parent_local_id is None:
+                    # SA1.2 fix: no text/heading seen on this page yet (e.g.
+                    # a page of icons continuing a legend from the previous
+                    # page) — fall back to the last one seen anywhere
+                    # earlier in the document, per module docstring.
+                    parent_local_id = last_text_local_id_doc
 
         if element_type == ELEMENT_TYPE_TABLE:
             text = _safe_export_markdown(item, doc)
@@ -311,6 +337,7 @@ def map_document_to_elements(
             ref_to_local_id[self_ref] = next_id
         if element_type in (ELEMENT_TYPE_PARAGRAPH, ELEMENT_TYPE_LIST, ELEMENT_TYPE_HEADING):
             last_text_local_id_by_page[page_number] = next_id
+            last_text_local_id_doc = next_id
 
         for cap_ref in getattr(item, "captions", None) or []:
             cref = getattr(cap_ref, "cref", None)

@@ -1,6 +1,6 @@
 [project]
 name = "backend"
-version = "0.7.9"
+version = "0.8.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,7 +14,6 @@ dependencies = [
     "httpx>=0.28.1",
     "opentelemetry-api>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
-    "paddleocr[doc-parser]>=3.7.0",
     "psycopg[binary]>=3.3.4",
     "pydantic-ai-slim[anthropic,google,openai]>=2.27.0",
     "pydantic-settings>=2",
@@ -22,6 +21,7 @@ dependencies = [
     "pymupdf>=1.28.2",
     "pymysql>=1.2.0",
     "python-json-logger>=4.1.0",
+    "python-multipart>=0.0.32",
     "qdrant-client[fastembed]>=1.19.0",
     "redis>=8.1.0",
     "sqlalchemy>=2.0.51",

@@ -9,30 +9,47 @@
 # All dependency installation goes through `uv` (never bare pip/poetry), per
 # CLAUDE.md.
 #
-# NOTE (worker-gpu, I1.4 update): GPU-heavy dependencies (torch, docling,
-# paddleocr-vl) are now added (see pyproject.toml) — the B0.5 TODO above
-# ("likely need to switch to an nvidia/cuda-enabled base image") was
-# investigated and turned out to be UNNECESSARY: `uv.lock` is a universal
-# (multi-platform) lock, and torch's Linux-marker dependencies already
-# include `cuda-bindings`/`cuda-toolkit[cublas,cudart,cufft,...]` (see
-# `uv.lock`, `name = "torch"` entry, `marker = "sys_platform == 'linux'"`) —
-# i.e. `uv sync` inside a Linux container resolves a CUDA-capable torch
-# wheel with the CUDA runtime bundled as pip dependencies, no system-level
-# CUDA toolkit/base image required. What IS required (host-level, not
-# image-level) is the NVIDIA Container Toolkit + driver on the Docker host —
-# verified working from WSL: `docker run --rm --gpus all
-# nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` correctly reports the RTX
-# 3060 (6144MiB) from inside a plain container. `worker-gpu` therefore stays
-# on the same `base` (python:3.12-slim) stage as api/worker.
+# NOTE (worker-gpu, I1.4 update): GPU-heavy dependencies (torch, docling)
+# are now added (see pyproject.toml) — the B0.5 TODO above ("likely need to
+# switch to an nvidia/cuda-enabled base image") was investigated and turned
+# out to be UNNECESSARY: `uv.lock` is a universal (multi-platform) lock, and
+# torch's Linux-marker dependencies already include `cuda-bindings`/
+# `cuda-toolkit[cublas,cudart,cufft,...]` (see `uv.lock`, `name = "torch"`
+# entry, `marker = "sys_platform == 'linux'"`) — i.e. `uv sync` inside a
+# Linux container resolves a CUDA-capable torch wheel with the CUDA runtime
+# bundled as pip dependencies, no system-level CUDA toolkit/base image
+# required. What IS required (host-level, not image-level) is the NVIDIA
+# Container Toolkit + driver on the Docker host — verified working from
+# WSL: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04
+# nvidia-smi` correctly reports the RTX 3060 (6144MiB) from inside a plain
+# container. `worker-gpu` therefore stays on the same `base`
+# (python:3.12-slim) stage as api/worker.
+#
+# NOTE (worker-gpu, I1.10 update — 02-ingestion-pipeline.md §4.0 "Opsi 3"):
+# `worker-gpu` now runs **only** Docling (Stage 2). PaddleOCR-VL (Stage 4)
+# moved to its own standalone service/image,
+# `vrf-chat/backend/paddleocr-vl-service/` (moved here from a vrf-chat/
+# top-level sibling per SA1.2 folder-structure review, 2026-08-09) —
+# `paddleocr` was REMOVED from this project's pyproject.toml (was briefly
+# a dependency here during I1.4). Root cause: `paddlepaddle-gpu` (needed for
+# PaddleOCR-VL's layout submodel) and `torch` (Docling) vendor incompatible
+# `nvidia-nccl-cu12` pip packages in the same venv, breaking `import torch`
+# entirely — see `docs/i1.6-vram-benchmark-report.md` §6 and
+# `paddleocr-vl-service/README.md` for the full finding/live
+# verification. `worker-gpu` calls PaddleOCR-VL exclusively via
+# `PADDLE_OCR_VL_BACKEND=remote_api` -> `paddleocr-vl-service` (a Docker
+# Compose neighbor container, not necessarily a network-distant "cloud"
+# endpoint — same env var/contract either way, transparent to this image).
 #
 # NOT YET verified: an actual `uv sync --frozen` build of THIS Dockerfile
 # inside WSL Docker, confirming `torch.cuda.is_available() is True` inside
 # the built worker-gpu container (as opposed to the ad-hoc nvidia/cuda
-# smoke-test image above) — deferred to the I1.6 WSL GPU benchmark, which
-# builds/runs this image for real anyway. On the Windows-native dev venv
-# used for I1.1-I1.4 development, `uv add docling` resolved a CPU-only
-# torch wheel (`2.13.0+cpu`) — expected/correct for Windows dev (no CUDA
-# toolkit resolution attempted there), not a sign of a lock-file problem.
+# smoke-test image above) — deferred to Q1.2 (QA Engineer's WSL/Docker GPU
+# verification), same scope boundary as I1.6. On the Windows-native dev
+# venv used for I1.1-I1.4 development, `uv add docling` resolved a
+# CPU-only torch wheel (`2.13.0+cpu`) — expected/correct for Windows dev
+# (no CUDA toolkit resolution attempted there), not a sign of a lock-file
+# problem.
 
 FROM python:3.12-slim AS base
 
@@ -79,10 +96,12 @@ FROM base AS worker
 CMD ["uv", "run", "--no-sync", "celery", "-A", "app.workers.celery_app", "worker", \
      "--loglevel=INFO", "-Q", "default"]
 
-# ---- GPU Celery worker (Docling GPU + PaddleOCR-VL cascade ingestion) ---
+# ---- GPU Celery worker (Docling GPU ingestion; PaddleOCR-VL is a separate
+# service, see NOTE above and 02-ingestion-pipeline.md §4.0) -------------
 # concurrency=1 is deliberate — see 02-ingestion-pipeline.md §4 (RTX 3060
-# 6GB VRAM constraint: Docling and PaddleOCR-VL must run sequentially with
-# explicit VRAM unload between stages, never concurrently).
+# 6GB VRAM constraint: this worker's own Docling usage must not run more
+# than one GPU job at a time; coordination with paddleocr-vl-service's own
+# GPU usage is cross-container, see §4.0 mitigation layers).
 FROM base AS worker-gpu
 
 CMD ["uv", "run", "--no-sync", "celery", "-A", "app.workers.celery_app", "worker", \

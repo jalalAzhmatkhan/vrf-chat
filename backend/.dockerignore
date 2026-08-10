@@ -13,3 +13,14 @@ data/object-storage/
 data/chroma/
 Dockerfile
 .dockerignore
+# paddleocr-vl-service is a fully separate deployable unit (its own
+# Dockerfile/venv/uv.lock, `context: ./backend/paddleocr-vl-service` in
+# docker-compose.yml) living inside backend/ purely for source-location
+# convenience (SA1.2 folder-structure review, 2026-08-10) — it must never
+# be copied into the backend-api/backend-worker/backend-worker-gpu build
+# context. This also fixes a real build-context-size bug found during F4
+# verification: without this line, `paddleocr-vl-service/.venv` (~7GB, a
+# local dev venv, itself covered by the top `.venv/` rule already but
+# nested one level deeper than expected) was being transferred into every
+# backend/ image's build context.
+paddleocr-vl-service/

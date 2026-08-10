@@ -15,6 +15,23 @@ capability only Qdrant actually needs today.
 Only `qdrant` is implemented — `chroma`/`milvus` are declared in `.env`
 schema (Bagian D §4) for future use but `build_vector_store_client` raises
 `NotImplementedError` for them (Bagian D §6: "bukan kebutuhan MVP").
+
+`delete_by_document` (2026-08-10, operational-habit correction): a
+document-scoped delete, added after a real incident during SA1.2 bugfix
+verification where a full `DELETE /collections/<name>` (drop the ENTIRE
+collection, not just one document's points) was used ad hoc as a "reset one
+document" step. That happened to be harmless *this once* (document_id=3 was
+the only document ever ingested so far in Fase 1), but is a genuinely
+dangerous habit once multiple documents coexist in the same collection — a
+full collection drop for a single-document re-ingest/bugfix/removal would
+destroy every other document's vectors too. `delete_by_document` filters on
+the `document_id` payload field (the same field `app/ingestion/embedder.py`
+`_build_payload` always sets) so any future "clear this document's vectors"
+need (re-ingest after a bugfix, document withdrawn from the corpus, etc.)
+has a properly-scoped method to call instead of reaching for a full
+collection drop. Full collection/database drops remain valid for genuine
+whole-environment resets (e.g. fresh dev setup) — never for single-entity
+cleanup, and never without explicit confirmation from Jalal/PM first.
 """
 
 from __future__ import annotations
@@ -67,6 +84,10 @@ class VectorStoreClient(Protocol):
     ) -> list[VectorSearchResult]: ...  # pragma: no cover
 
     def delete(self, collection: str, ids: list[str]) -> None: ...  # pragma: no cover
+
+    def delete_by_document(
+        self, collection: str, document_id: int
+    ) -> None: ...  # pragma: no cover
 
     def get_collection_stats(self, collection: str) -> CollectionStats: ...  # pragma: no cover
 
@@ -129,6 +150,24 @@ class QdrantVectorStoreClient:
         self._client.delete(
             collection_name=collection,
             points_selector=qmodels.PointIdsList(points=list(ids)),
+        )
+
+    def delete_by_document(self, collection: str, document_id: int) -> None:
+        """Scoped delete of every point belonging to `document_id` — see
+        module docstring "operational-habit correction". Uses a payload
+        filter (`FilterSelector`), NOT a full collection drop, so other
+        documents' points in the same collection are untouched."""
+        self._client.delete(
+            collection_name=collection,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="document_id", match=qmodels.MatchValue(value=document_id)
+                        )
+                    ]
+                )
+            ),
         )
 
     def get_collection_stats(self, collection: str) -> CollectionStats:

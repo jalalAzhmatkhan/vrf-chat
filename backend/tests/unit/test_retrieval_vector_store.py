@@ -123,6 +123,23 @@ def test_delete_builds_point_ids_list() -> None:
     assert fake_client.delete_calls[0]["points_selector"].points == ["1", "2"]
 
 
+def test_delete_by_document_builds_scoped_filter_not_full_drop() -> None:
+    """[2026-08-10 operational-habit correction] Must be a document-scoped
+    `FilterSelector` delete, never a full collection drop — see module
+    docstring."""
+    fake_client = FakeQdrantClient()
+    client = vs.QdrantVectorStoreClient(fake_client)
+
+    client.delete_by_document("vrf_chunks", document_id=3)
+
+    assert len(fake_client.delete_calls) == 1
+    call = fake_client.delete_calls[0]
+    assert call["collection_name"] == "vrf_chunks"
+    selector = call["points_selector"]
+    assert selector.filter.must[0].key == "document_id"
+    assert selector.filter.must[0].match.value == 3
+
+
 def test_get_collection_stats_extracts_dense_dimension() -> None:
     fake_client = FakeQdrantClient()
     fake_client.collection_info = SimpleNamespace(

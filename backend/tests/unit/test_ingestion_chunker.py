@@ -62,6 +62,131 @@ def test_parse_markdown_table_single_line_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _parse_html_table / _parse_table_rows
+# [QA phase-1-qa-report.md §1.3, F1] Real PaddleOCR-VL table-reparse output
+# (extraction_method='docling+paddle_table') is HTML, not markdown —
+# `_parse_markdown_table` always returned [] for it. Fixture below is a
+# real (not synthetic) excerpt of `content_text` from chunk id 1499,
+# document_id=3 (a "Warning" precautions table, 2 of its real 7 rows kept
+# verbatim — including the real `colspan="2"` title row, `style` attributes,
+# and embedded `<img>` tags — trimmed only for test-file length, not
+# simplified/sanitized).
+# ---------------------------------------------------------------------------
+
+_REAL_PADDLE_TABLE_HTML = (
+    "<table border=1 style='margin: auto; word-wrap: break-word;'>"
+    '<tr><td colspan="2">Warning</td></tr>'
+    "<tr>"
+    "<td style='text-align: center; word-wrap: break-word;'>"
+    "Do not store the equipment in a room with successive fire sources "
+    "(e.g., naked flame, gas appliance, electric heater)."
+    "</td>"
+    "<td style='text-align: center; word-wrap: break-word;'>"
+    '<img src="imgs/img_in_image_box_933_105_1053_220.jpg" alt="Image"" />'
+    "</td>"
+    "</tr>"
+    "<tr>"
+    "<td style='text-align: center; word-wrap: break-word;'>"
+    "Be sure to disconnect the power cable plug from the plug socket before "
+    "disassembling the equipment for repair."
+    "</td>"
+    "<td style='text-align: center; word-wrap: break-word;'>"
+    '<img src="imgs/img_in_image_box_934_268_1048_385.jpg" alt="Image"" />'
+    "</td>"
+    "</tr>"
+    "</table>"
+)
+
+
+def test_parse_html_table_real_paddle_table_reparse_fixture() -> None:
+    rows = ck._parse_html_table(_REAL_PADDLE_TABLE_HTML)
+
+    # Row 0: the real colspan=2 "Warning" title row — expanded across both
+    # columns (never dropped/misaligned).
+    assert rows[0] == {"col_0": "Warning", "col_1": "Warning"}
+    # Row 1/2: real instruction text in col_0, embedded <img> in col_1
+    # contributes no text (image is not lost — content_text/markdown still
+    # keeps the raw HTML; this row's structured form is correctly empty).
+    assert rows[1]["col_0"].startswith("Do not store the equipment")
+    assert rows[1]["col_1"] == ""
+    assert rows[2]["col_0"].startswith("Be sure to disconnect")
+    assert rows[2]["col_1"] == ""
+    assert len(rows) == 3
+
+
+def test_parse_html_table_colspan_expands_across_columns() -> None:
+    html = (
+        '<table><tr><td colspan="3">Merged</td></tr>'
+        "<tr><td>a</td><td>b</td><td>c</td></tr></table>"
+    )
+    rows = ck._parse_html_table(html)
+    assert rows[0] == {"col_0": "Merged", "col_1": "Merged", "col_2": "Merged"}
+    assert rows[1] == {"col_0": "a", "col_1": "b", "col_2": "c"}
+
+
+def test_parse_html_table_non_numeric_colspan_defaults_to_one() -> None:
+    """[QA phase-1-qa-report.md follow-up, coverage gap] A non-numeric
+    `colspan` attribute (malformed real-world HTML, e.g. `colspan="auto"`)
+    must not crash — falls back to `colspan=1` (no expansion) rather than
+    propagating the `ValueError` from `int(value)`."""
+    html = '<table><tr><td colspan="auto">x</td><td>y</td></tr></table>'
+    rows = ck._parse_html_table(html)
+    assert rows == [{"col_0": "x", "col_1": "y"}]
+
+
+def test_parse_html_table_no_rows_returns_empty() -> None:
+    assert ck._parse_html_table("<table></table>") == []
+
+
+def test_parse_html_table_empty_row_skipped() -> None:
+    html = "<table><tr></tr><tr><td>x</td></tr></table>"
+    rows = ck._parse_html_table(html)
+    assert rows == [{"col_0": "x"}]
+
+
+def test_parse_html_table_malformed_html_returns_empty_not_raises() -> None:
+    # An unterminated <td>/<tr> (no closing tags) never fires
+    # handle_endtag, so nothing is appended to a row/to `rows` — this
+    # degrades safely to [] rather than raising, matching
+    # `_parse_markdown_table`'s "defensive, not an error" contract for
+    # anything that doesn't parse cleanly.
+    assert ck._parse_html_table("<table><tr><td>unterminated") == []
+
+
+def test_parse_table_rows_dispatches_html_by_content_prefix() -> None:
+    rows = ck._parse_table_rows("<table><tr><td>x</td></tr></table>")
+    assert rows == [{"col_0": "x"}]
+
+
+def test_parse_table_rows_dispatches_markdown_by_default() -> None:
+    rows = ck._parse_table_rows("| A |\n| --- |\n| 1 |")
+    assert rows == [{"A": "1"}]
+
+
+def test_parse_table_rows_none_returns_empty() -> None:
+    assert ck._parse_table_rows(None) == []
+
+
+def test_parse_table_rows_html_prefix_is_case_insensitive_and_whitespace_tolerant() -> None:
+    rows = ck._parse_table_rows("  \n<TABLE><tr><td>x</td></tr></table>")
+    assert rows == [{"col_0": "x"}]
+
+
+def test_parse_table_rows_detects_html_with_caption_before_table() -> None:
+    """[QA phase-1-qa-report.md §1.3 F1, real edge case found during fix
+    verification — document_id=3 chunk id 3734] Real PaddleOCR-VL output
+    sometimes prepends a caption OUTSIDE the table (`<div>...</div>` before
+    `<table>`) — a strict `startswith("<table")` check misses this and
+    silently falls through to the markdown parser (returning [] again)."""
+    html = (
+        '<div style="text-align: center;">Parameter [A]</div>\n\n'
+        "<table><tr><td>x</td></tr></table>"
+    )
+    rows = ck._parse_table_rows(html)
+    assert rows == [{"col_0": "x"}]
+
+
+# ---------------------------------------------------------------------------
 # build_chunks — text grouping
 # ---------------------------------------------------------------------------
 

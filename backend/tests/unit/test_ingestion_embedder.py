@@ -84,6 +84,7 @@ class FakeQdrantClient:
         self._exists = exists
         self.create_calls: list[dict[str, Any]] = []
         self.upsert_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
 
     def collection_exists(self, collection: str) -> bool:
         return self._exists
@@ -93,6 +94,26 @@ class FakeQdrantClient:
 
     def upsert(self, collection_name: str, points: Any) -> None:
         self.upsert_calls.append({"collection_name": collection_name, "points": points})
+
+    def delete(self, collection_name: str, points_selector: Any) -> None:
+        self.delete_calls.append(
+            {"collection_name": collection_name, "points_selector": points_selector}
+        )
+
+
+def test_delete_chunks_by_document_scopes_by_document_id_filter() -> None:
+    """[2026-08-10 operational-habit correction] Must be a scoped
+    `FilterSelector` delete (one document's points), never a full
+    collection drop — see module docstring."""
+    client = FakeQdrantClient()
+    em.delete_chunks_by_document(client, "vrf_chunks", document_id=3)
+
+    assert len(client.delete_calls) == 1
+    call = client.delete_calls[0]
+    assert call["collection_name"] == "vrf_chunks"
+    selector = call["points_selector"]
+    assert selector.filter.must[0].key == "document_id"
+    assert selector.filter.must[0].match.value == 3
 
 
 def test_ensure_collection_skips_if_exists() -> None:

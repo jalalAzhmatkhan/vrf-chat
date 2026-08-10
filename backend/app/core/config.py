@@ -153,8 +153,16 @@ class Settings(BaseSettings):
     # Documentation/system-design/02-ingestion-pipeline.md §3-4 and
     # app/ingestion/docling_parser.py. Only consumed by the GPU ingestion
     # Celery task (backend-worker-gpu), never validated at API startup — see
-    # app/ingestion/docling_parser.py module docstring for rationale. ----
-    DOCLING_DEVICE: Literal["cuda", "cpu"] = "cuda"
+    # app/ingestion/docling_parser.py module docstring for rationale.
+    # DOCLING_DEVICE: [SA1.1 recommendation, ratified by Jalal 2026-08-10]
+    # default changed cuda -> cpu — PaddleOCR-VL's own real VRAM footprint
+    # (~5.92-5.98GB of 6.14GB, see paddleocr-vl-service/README.md) leaves
+    # essentially no headroom to share with a GPU-resident Docling, and
+    # Docling's measured GPU-vs-CPU speedup (~1.4x, I1.6 benchmark) was
+    # judged not worth the OOM risk. `cuda` remains fully supported (no code
+    # change needed) as an explicit override, e.g. for a cloud GPU with more
+    # headroom. ----
+    DOCLING_DEVICE: Literal["cuda", "cpu"] = "cpu"
     DOCLING_ICON_MAX_AREA_RATIO: float = 0.02
     DOCLING_ICON_MAX_DIM_PT: float = 80.0
     # WAJIB true in dev (RTX 3060 6GB) — Docling and PaddleOCR-VL must never
@@ -163,10 +171,14 @@ class Settings(BaseSettings):
 
     # ---- Ingestion Stage 3 — deterministic cascade trigger rules, see
     # Documentation/system-design/02-ingestion-pipeline.md §3 and
-    # app/ingestion/cascade_trigger.py. Starting-point values per design doc
-    # §3 — WAJIB dikalibrasi ulang via I1.6 benchmark before full-volume
-    # ingestion. ----
-    THRESHOLD_TABLE: float = 0.75
+    # app/ingestion/cascade_trigger.py.
+    # THRESHOLD_TABLE: [SA1.1 KALIBRASI FINAL, 2026-08-09] 0.75 -> 0.90,
+    # calibrated from real I1.6 50-page benchmark data (all 27 observed
+    # real table_score values were above the old 0.75 default, so it never
+    # triggered on real content — see 02-ingestion-pipeline.md §3/
+    # docs/i1.6-vram-benchmark-report.md §3.1 for the full distribution).
+    # THRESHOLD_TEXT: unchanged, still a starting point (0.6). ----
+    THRESHOLD_TABLE: float = 0.90
     THRESHOLD_TEXT: float = 0.6
 
     # ---- Ingestion Stage 4 — PaddleOCR-VL cascade, see
@@ -184,7 +196,32 @@ class Settings(BaseSettings):
     PADDLE_OCR_VL_MAX_CONCURRENT_WORKERS: int = 1
     PADDLE_OCR_VL_API_URL: str | None = None
     PADDLE_OCR_VL_API_KEY: str | None = None
-    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 60
+    # [I1.10 live finding, confirmed with real 286-page corpus] 60s then
+    # 180s (earlier revisions of this default) both proved too short — a
+    # subset of real cascade tasks (electrical diagrams/complex tables,
+    # under the ~5.96-5.98GB VRAM pressure documented in
+    # paddleocr-vl-service/README.md) genuinely take longer than 180s to
+    # generate, CONFIRMED via GPU utilization at 100% throughout (real
+    # computation, not a hang) and via a live run at 420s/0-retries where
+    # the full paddle_cascade stage for all 286 pages completed
+    # successfully. 420s is therefore the evidence-based default, not a
+    # guess — see docs/i1.10-e2e-findings.md for the full investigation
+    # (including the ruled-out hypothesis that this was purely an
+    # event-loop-blocking artifact — that WAS a real, separate bug, fixed
+    # in paddleocr-vl-service, but did not by itself explain requests this
+    # slow).
+    PADDLE_OCR_VL_TIMEOUT_SECONDS: int = 420
+    # [I1.10 live finding, revised] a bounded retry on timeout/connection
+    # error is a better mitigation than an ever-larger timeout alone for
+    # genuine transient failures (e.g. a "cold start after idle-unload" —
+    # see RemoteAPIPaddleOCRVLClient._post docstring). Lowered from 2 to 1:
+    # now that PADDLE_OCR_VL_TIMEOUT_SECONDS=420 already accounts for
+    # genuinely-slow-but-working requests (confirmed via 100% GPU
+    # utilization throughout, not a hang), a *second* full-length retry on
+    # top of that mostly just multiplies worst-case per-element wait time
+    # (up to 3x420s=21min with the old default) without addressing a
+    # different failure mode than the first retry already covers.
+    PADDLE_OCR_VL_MAX_RETRIES: int = 1
 
     # ---- Vector Store abstraction, see
     # Documentation/system-design/04-provider-abstractions.md Bagian D and

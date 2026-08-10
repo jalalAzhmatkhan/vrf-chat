@@ -98,7 +98,7 @@ async function parseErrorBody(response) {
 }
 
 /**
- * @param {{ conversation_id?: number|null, message: string, model_override?: string }} body
+ * @param {{ conversation_id?: string|null, message: string, model_override?: string }} body
  * @param {{ signal?: AbortSignal }} [options]
  * @returns {AsyncGenerator<ChatStreamEvent>}
  */

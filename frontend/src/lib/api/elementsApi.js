@@ -10,6 +10,7 @@ import { apiFetch } from '../httpClient';
  *   bbox: {l:number,t:number,r:number,b:number,page_number:number,coord_origin:string}|null,
  *   section_path: unknown[]|null, image_uri: string|null,
  *   visual_description: Record<string, unknown>|null,
+ *   content_structured: {rows: Array<Record<string, unknown>>, headers?: string[], truncated?: boolean}|null,
  * }} ElementDetail
  */
 

@@ -1,0 +1,92 @@
+/* Documentation/ui-ux-design/01-design-system.md §7.3, applied inside the
+   Table card of `04-chat-ui.md` §7. */
+
+.wrapper {
+  position: relative;
+  width: 100%;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-sm);
+}
+
+.scrollInner {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.scrollInner.scrollable {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-bg-surface-raised);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  text-align: left;
+  padding: 10px 16px;
+  border-bottom: 2px solid rgba(34, 211, 238, 0.4);
+  border-right: 1px solid var(--color-border-subtle);
+  white-space: nowrap;
+}
+
+.th:last-child {
+  border-right: none;
+}
+
+.identifierHeader {
+  text-align: right;
+}
+
+.td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  border-right: 1px solid var(--color-border-subtle);
+  color: var(--color-text-primary);
+  vertical-align: top;
+}
+
+.td:last-child {
+  border-right: none;
+}
+
+.identifierCell {
+  text-align: right;
+  color: var(--color-text-secondary);
+}
+
+.zebra tbody tr:nth-child(even) {
+  background: var(--color-bg-surface-raised);
+}
+
+@media (max-width: 767px) {
+  .wrapper::before,
+  .wrapper::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 24px;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .wrapper::before {
+    left: 0;
+    background: linear-gradient(to right, var(--color-bg-surface), transparent);
+  }
+  .wrapper::after {
+    right: 0;
+    background: linear-gradient(to left, var(--color-bg-surface), transparent);
+  }
+}

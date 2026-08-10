@@ -26,7 +26,11 @@ export function useChatStream() {
       )) {
         switch (evt.event) {
           case 'status':
-            dispatch({ type: 'STREAM_STATUS', assistantId, stage: evt.data?.stage });
+            // §5.6: `conversation_id` is resolved server-side before the
+            // *first* event (not just `done`) — capture it here so a
+            // brand-new conversation is already known even if the stream
+            // fails before `done`.
+            dispatch({ type: 'STREAM_STATUS', assistantId, stage: evt.data?.stage, conversationId: evt.data?.conversation_id });
             break;
           case 'token':
             dispatch({ type: 'STREAM_TOKEN', assistantId, delta: evt.data?.delta ?? '' });
@@ -44,6 +48,11 @@ export function useChatStream() {
               type: 'STREAM_ERROR',
               assistantId,
               error: evt.data ?? { code: 'unknown', message: 'Terjadi kesalahan.' },
+              // §5.6: included "if the conversation row was already
+              // created" — undefined/null here just means it wasn't yet,
+              // in which case retry correctly falls back to starting a new
+              // conversation (state.conversationId unchanged).
+              conversationId: evt.data?.conversation_id,
             });
             break;
           default:

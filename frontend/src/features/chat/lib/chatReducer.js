@@ -4,9 +4,17 @@
  * `status: 'idle' | 'connecting' | 'status' | 'streaming' | 'done' |
  * 'error'`). Kept framework-agnostic (no React) so it's independently
  * testable.
+ *
+ * `conversationId` is a `string` (F2-04,
+ * `05-streaming-and-api-contract.md` §5.6 — **not** a number). It's also
+ * now captured from the `status` and `error` events, not just `done`
+ * (§5.6: the backend resolves/creates the conversation row *before* the
+ * first event is emitted) — this means a request that fails mid-stream
+ * still lets the retry/composer flow continue the *same* conversation
+ * instead of silently starting a new one.
  */
 
-/** @returns {{ messages: unknown[], conversationId: number|null }} */
+/** @returns {{ messages: unknown[], conversationId: string|null }} */
 export function initialChatState() {
   return { messages: [], conversationId: null };
 }
@@ -62,11 +70,14 @@ export function chatReducer(state, action) {
     }
 
     case 'STREAM_STATUS':
-      return mapMessage(state, action.assistantId, (message) => ({
-        ...message,
-        status: 'status',
-        stage: action.stage,
-      }));
+      return {
+        ...mapMessage(state, action.assistantId, (message) => ({
+          ...message,
+          status: 'status',
+          stage: action.stage,
+        })),
+        conversationId: action.conversationId ?? state.conversationId,
+      };
 
     case 'STREAM_TOKEN':
       return mapMessage(state, action.assistantId, (message) => ({
@@ -106,11 +117,14 @@ export function chatReducer(state, action) {
     }
 
     case 'STREAM_ERROR':
-      return mapMessage(state, action.assistantId, (message) => ({
-        ...message,
-        status: 'error',
-        error: action.error,
-      }));
+      return {
+        ...mapMessage(state, action.assistantId, (message) => ({
+          ...message,
+          status: 'error',
+          error: action.error,
+        })),
+        conversationId: action.conversationId ?? state.conversationId,
+      };
 
     default:
       return state;

@@ -8,9 +8,9 @@ prosedur servis dengan referensi yang bisa dilacak balik ke halaman &
 dokumen sumber aslinya — termasuk elemen non-teks (skema elektrikal, tabel,
 gambar display alat, ikon tombol inline, flow diagram).
 
-> Dokumentasi arsitektur & keputusan desain lengkap ada di
-> `../Documentation/system-design/`. README ini adalah ringkasan orientasi
-> untuk siapapun yang baru masuk ke repo `vrf-chat/`.
+> README ini adalah ringkasan orientasi untuk siapapun yang baru masuk ke
+> repo ini. Dokumen desain rinci (arsitektur, roadmap, laporan QA, desain
+> UI/UX) disimpan terpisah di luar repo ini dan tidak ikut di-commit.
 
 ## Status Proyek
 
@@ -18,7 +18,8 @@ gambar display alat, ikon tombol inline, flow diagram).
 |---|---|---|
 | **Fase 0 — Foundation** | Scaffold FE/BE, abstraksi provider (LLM/object storage/DB/vector store) via `.env`, skema data inti, Docker/WSL, Authentication & RBAC | ✅ Selesai |
 | **Fase 1 — Ingestion Pipeline** | PDF → canonical representation (Docling + PaddleOCR-VL cascade) → chunking → embedding (Qdrant) | ✅ Selesai |
-| **Fase 2 — Chat Core** | Hybrid retrieval, Pydantic AI agent + tools, chat streaming (SSE), citation viewer | ⏳ Belum dimulai |
+| **KG Foundation — Wave 1** | Ekstraksi kandidat entity/relasi KG: perbaikan presisi aturan, kunci kanonik, sinyal confidence, graf struktur dokumen, vocabulary lintas-vendor | ✅ Selesai |
+| **Fase 2 — Chat Core** | Hybrid retrieval, Pydantic AI agent + tools, chat streaming (SSE), citation viewer | 🔄 Berjalan |
 | **Fase 3 — Evaluation & Admin** | Dashboard evaluasi retrieval/generation, Manual Review Queue, halaman RBAC | ⏳ Belum dimulai |
 
 Bukti nyata pipeline ingestion sudah berjalan end-to-end: 1 dokumen penuh
@@ -115,11 +116,156 @@ trigger (`created=False`), re-run manual untuk 1 dokumen yang sudah ada
 akan skip penulisan DB per-halaman yang hash-nya cocok (Docling/PaddleOCR-VL
 tetap dijalankan ulang, hanya insert/update DB yang dihindari).
 
-**Requirement kritis yang dijaga pipeline ini** (lihat `CLAUDE.md` §4 di
-root proyek): ikon/tombol inline tetap terasosiasi ke kalimat induknya
-(termasuk kasus lintas halaman), struktur tabel tetap ter-query (bukan
-flatten jadi teks acak, termasuk hasil PaddleOCR-VL yang formatnya HTML
-bukan markdown), dan traceability penuh `chunk → element → page → document`.
+**Requirement kritis yang dijaga pipeline ini**: ikon/tombol inline tetap
+terasosiasi ke kalimat induknya (termasuk kasus lintas halaman), struktur
+tabel tetap ter-query (bukan flatten jadi teks acak, termasuk hasil
+PaddleOCR-VL yang formatnya HTML bukan markdown), dan traceability penuh
+`chunk → element → page → document`.
+
+## Ekstraksi Kandidat Knowledge Graph
+
+Kandidat entity/relasi KG diekstrak **secara deterministik** (regex +
+dictionary domain), **bukan** lewat LLM — konsisten dengan prinsip
+"deterministic tools, not model judgment" yang dipakai di sisi ingestion.
+Kandidat disimpan sebagai `jsonb` di kolom `elements.kg_candidate_entities`
+/ `kg_candidate_relations`, dan **belum dimuat ke Neo4j** (itu fase
+berikutnya).
+
+```mermaid
+flowchart TB
+    subgraph Sumber["Dua sumber kandidat per elemen"]
+        VLM["visual_description<br/>hasil Stage 4 PaddleOCR-VL<br/>(figure/icon/diagram)"]
+        Teks["elements.text<br/>(paragraf, tabel, prosedur)"]
+    end
+
+    Vocab["vrf_vocabulary.py<br/>pola UNION lintas-vendor"]
+
+    subgraph Pola["Pencocokan pola"]
+        Sensor["Sensor: TH# (Mitsubishi)<br/>+ R#T (Daikin/Zeggo)"]
+        Konektor["Konektor/Terminal: CN# (Mitsubishi)<br/>+ X#M (IEC, Daikin/Zeggo)"]
+        Error["ErrorCode: prefix 1 huruf (P8/U4)<br/>+ prefix 2 huruf + subkode (AH, AJ-xx)"]
+        Komponen["Komponen: keyword word-boundary<br/>+ guard halaman glosarium"]
+    end
+
+    Anchor{"Anchor kontekstual<br/>ada di sekitarnya?<br/>(tabel error code,<br/>kata kunci 'malfunction' dst)"}
+    Tier["Confidence tiering<br/>anchored → tinggi (0.6-0.75)<br/>tanpa anchor → rendah (0.3)"]
+    Cross["Cross-source agreement<br/>VLM ∧ teks pada bukti yang SAMA<br/>→ corroboration_count naik"]
+    Kanonik["Kunci kanonik<br/>(model_family, entity_type, identifier)<br/>— TH3 Mitsubishi ≠ TH3 Daikin"]
+    Simpan[("elements.kg_candidate_entities<br/>kg_candidate_relations (jsonb)<br/>+ provenance: document/page/element_id")]
+
+    VLM --> Pola
+    Teks --> Pola
+    Vocab --> Pola
+    Pola --> Anchor
+    Anchor -->|ya| Tier
+    Anchor -->|tidak| Tier
+    Tier --> Cross --> Kanonik --> Simpan
+
+    style Anchor fill:#fff3cd,stroke:#997404
+    style Simpan fill:#d5e8f9,stroke:#1a6fc4
+```
+
+**Graf struktur dokumen** dibangun terpisah dan **tidak butuh ekstraksi
+kandidat sama sekali** — murni diturunkan dari output Docling
+(`Document → Page → Section → Element`, plus hierarki heading), sehingga
+deterministik dengan presisi 100% dan hasilnya identik saat diulang.
+
+**Re-extraction tanpa re-ingest**: karena kandidat KG hanya bergantung pada
+`elements` yang sudah tersimpan, strategi ekstraksi bisa diubah kapan saja
+dan dijalankan ulang lewat modul re-extractor — **≈6 detik per dokumen
+286 halaman**, dibanding ~82 menit kalau harus re-ingest Stage 1–4. Ini yang
+membuat penyempurnaan strategi KG murah untuk ditunda.
+
+## Fase 2 — Logic Flow Chat
+
+Prinsip utamanya: **agent hanya meng-orkestrasi, tools yang deterministik.**
+Agent tidak memutuskan "bagaimana cara mencari" — tiap tool punya signature
+eksplisit dan perilaku yang dapat diprediksi.
+
+```mermaid
+flowchart TB
+    Q["Pertanyaan user"]
+    QE["Query expansion heuristik<br/>(dictionary sinonim + regex identifier)<br/>— TANPA LLM call, demi anggaran TTFT"]
+    HS["Hybrid search ke Qdrant<br/>dense + sparse, RRF fusion native"]
+    CB["Context Builder<br/>menyisipkan marker {{el:ID}}<br/>pada posisi yang sudah diketahui"]
+    LLM["Pydantic AI agent<br/>+ tools deterministik<br/>(search_error_code, find_component,<br/>find_wiring_diagram, get_figure, ...)"]
+    Gate{"Gerbang validasi deterministik<br/>pasca-generasi"}
+    Strip["Marker dengan element_id<br/>di luar konteks → di-strip + di-log"]
+    CiteVal["Sitasi di luar whitelist konteks<br/>→ di-drop + di-log"]
+    Safety{"Setelah validasi:<br/>masih ada sitasi sah?"}
+    Refuse["refused=True<br/>'informasi tidak ditemukan di manual'"]
+    Answer["TechnicalAnswer<br/>answer + citations + warnings<br/>+ confidence + related_*"]
+    SSE["Stream SSE ke frontend"]
+
+    Q --> QE --> HS --> CB --> LLM --> Gate
+    Gate --> Strip
+    Gate --> CiteVal
+    Strip --> Safety
+    CiteVal --> Safety
+    Safety -->|tidak| Refuse --> SSE
+    Safety -->|ya| Answer --> SSE
+
+    style Gate fill:#fff3cd,stroke:#997404
+    style Refuse fill:#f9d5a7,stroke:#c47f1a
+```
+
+**Kenapa ada gerbang validasi deterministik?** LLM bisa mengarang
+`element_id` — dan sitasi palsu di domain HVAC lebih berbahaya daripada
+menolak menjawab, karena teknisi akan membuka manual di halaman yang salah.
+Karena itu marker maupun sitasi **selalu** divalidasi balik terhadap konteks
+yang benar-benar diretrieve, dan aturan "never invent" dievaluasi terhadap
+sitasi **tervalidasi**, bukan output mentah LLM.
+
+**Anggaran TTFT (< 30 detik)**: retrieval + context building dijaga di bawah
+~3 detik (query expansion <1 ms, hybrid search ~15–440 ms), sisanya milik
+LLM. Karena itu query expansion sengaja heuristik, bukan LLM call sinkron.
+
+## Fase 2 — Sequence Flow Chat & Citation Viewer
+
+```mermaid
+sequenceDiagram
+    actor Teknisi
+    participant FE as Frontend (React)
+    participant API as Backend API
+    participant Qdrant
+    participant PG as PostgreSQL
+    participant LLM as LLM Provider (CHAT_LLM_*)
+    participant Storage as Object Storage
+
+    Teknisi->>FE: ketik pertanyaan teknis
+    FE->>API: POST /api/v1/chat/stream (scope chat:write)
+    API-->>FE: SSE status (stage=searching_manual)
+    API->>API: query expansion heuristik (tanpa LLM)
+    API->>Qdrant: hybrid search dense+sparse (RRF)
+    Qdrant-->>API: top-k chunk
+    API->>PG: enrich chunk → elements, bbox, section_path
+    API-->>FE: SSE status (stage=building_context)
+    API->>API: Context Builder sisipkan marker {{el:ID}}
+    API-->>FE: SSE status (stage=generating_answer)
+
+    loop selama generasi (dibatasi UsageLimits)
+        API->>LLM: prompt + context (+ hasil tool sebelumnya)
+        LLM-->>API: token / permintaan tool call
+        opt agent memanggil tool deterministik
+            API->>Qdrant: search_error_code / find_component / ...
+            API->>PG: get_document_page / get_figure
+        end
+        API-->>FE: SSE token (delta teks, marker di-buffer utuh)
+    end
+
+    API->>API: validasi marker + whitelist sitasi, evaluasi never-invent
+    API-->>FE: SSE citation (element_type, image_uri, content_structured utk tabel)
+    API-->>FE: SSE done (conversation_id, ttft_ms, total_latency_ms)
+    API->>PG: simpan messages + citations
+
+    Note over Teknisi,Storage: Verifikasi ke manual asli
+    Teknisi->>FE: klik sitasi
+    FE->>API: GET /api/v1/documents/{id}/pages/{n} (scope documents:read)
+    API->>Storage: resolve page image URI
+    API-->>FE: page image + elements (bbox, page_width_pt/height_pt)
+    FE->>FE: konversi bbox (PDF points, origin bottom-left → CSS top-left)
+    FE-->>Teknisi: halaman PDF asli + highlight bbox + auto-zoom
+```
 
 ## Sequence Flow: Autentikasi & Otorisasi
 
@@ -253,10 +399,16 @@ vrf-chat/
 | `POST` | `/api/v1/documents` | `documents:write` | Trigger ingestion (multipart upload) |
 | `GET` | `/api/v1/documents/{id}/ingestion-jobs` | `documents:write` | Status job ingestion |
 
+> Endpoint Fase 2 (`/chat`, `/chat/stream`, `/conversations`, `/elements/{id}`,
+> `/documents/{id}/pages/{n}`) yang muncul di diagram alur di atas **belum
+> ada di branch utama** — masih dalam pengerjaan Fase 2. Tabel ini hanya
+> memuat endpoint yang sudah benar-benar ter-merge.
+
 ## Menjalankan Secara Lokal
 
 > **Docker hanya boleh dijalankan dari WSL**, tidak pernah dari Windows
-> native (lihat `CLAUDE.md` §5 di root proyek).
+> native — GPU passthrough (RTX 3060) hanya tersedia lewat WSL2 di
+> environment pengembangan proyek ini.
 
 ```bash
 # dari shell WSL, di dalam vrf-chat/
@@ -272,12 +424,5 @@ Backend: `cd backend && uv sync && uv run uvicorn app.main:app --reload`
 Frontend: `cd frontend && npm ci && npm run dev`
 
 Konfigurasi provider (LLM/object storage/DB/vector store) lewat
-`backend/.env` — lihat `backend/.env.example` untuk daftar variabel
-lengkap per provider.
-
-## Referensi Lebih Lanjut
-
-- Arsitektur & keputusan desain: `../Documentation/system-design/`
-- Roadmap & task breakdown: `../Documentation/project-milestones/`
-- Laporan QA: `../Documentation/qa-reports/`
-- Desain UI/UX: `../Documentation/ui-ux-design/`
+`backend/.env` — lihat `backend/.env.example` untuk daftar variabel lengkap
+per provider, termasuk nilai yang valid untuk tiap `*_PROVIDER`.

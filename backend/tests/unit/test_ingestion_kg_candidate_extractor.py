@@ -528,6 +528,179 @@ def test_extract_kg_candidates_threads_model_family_onto_every_candidate() -> No
     assert len(results[2].entities) == 2  # TH3 + compressor
 
 
+# ---------------------------------------------------------------------------
+# cross-source agreement (KG-W1.7, R3)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_cross_source_agreement_marks_opposite_mechanism_matches() -> None:
+    vlm_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="Compressor",  # different case — key comparison is case-insensitive
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is True
+    assert vlm_entity.corroboration_count == 1
+    assert text_entity.cross_source_corroborated is True
+    assert text_entity.corroboration_count == 1
+
+
+def test_apply_cross_source_agreement_same_mechanism_does_not_corroborate() -> None:
+    """[KG-W1.7, R3] Two text-path matches for the same entity on the same
+    page are NOT independent evidence of each other."""
+    entity_a = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entity_b = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [entity_a, entity_b]
+    kg._apply_cross_source_agreement(entities)
+
+    assert entity_a.cross_source_corroborated is False
+    assert entity_a.corroboration_count == 0
+    assert entity_b.cross_source_corroborated is False
+    assert entity_b.corroboration_count == 0
+
+
+def test_apply_cross_source_agreement_different_pages_do_not_corroborate() -> None:
+    """[KG-W1.7, R3] Agreement is scoped to the SAME evidence (same page) —
+    NOT the multigraph-merge-across-pages behavior §5.2 explicitly forbids
+    for relations (and which this module never does for entities either)."""
+    vlm_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=99,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is False
+    assert text_entity.cross_source_corroborated is False
+
+
+def test_apply_cross_source_agreement_different_entity_type_does_not_corroborate() -> None:
+    vlm_entity = kg.KGCandidateEntity(
+        name="TH3",
+        entity_type="Sensor",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_REGEX_SENSOR_ID + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="TH3",
+        entity_type="Connector",  # different entity_type -> different key
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_REGEX_CONNECTOR_ID,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is False
+    assert text_entity.cross_source_corroborated is False
+
+
+def test_extract_kg_candidates_applies_cross_source_agreement_end_to_end() -> None:
+    """[KG-W1.7, R3] End-to-end via `extract_kg_candidates`: a figure's VLM
+    `description` text and a nearby paragraph's plain text both mention
+    "compressor" on the same page — real, working avenue on current data
+    per module docstring (structured `components[]` is still always empty
+    in practice)."""
+    figure_element = _element(local_id=1, element_type="figure", text=None, page_number=7)
+    text_element = _element(
+        local_id=2, element_type="paragraph", text="Check the compressor for leaks.", page_number=7
+    )
+    parse_result = DoclingParseResult(
+        elements=[figure_element, text_element],
+        page_confidence={7: _page_confidence(7)},
+        page_count=7,
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=7, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Schematic showing the compressor.", components=[], connections=[]
+        ),
+    )
+
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf", cascade_results=[cascade_result])
+
+    vlm_compressor = next(e for e in results[1].entities if e.name == "compressor")
+    text_compressor = next(e for e in results[2].entities if e.name == "compressor")
+    assert vlm_compressor.cross_source_corroborated is True
+    assert text_compressor.cross_source_corroborated is True
+    assert vlm_compressor.corroboration_count == 1
+    assert text_compressor.corroboration_count == 1
+
+
+def test_extract_kg_candidates_relations_not_corroborated_by_this_branch() -> None:
+    """[KG-W1.7, R3] Relations stay at their KG-W1.4 defaults — no second,
+    independent relation-extraction mechanism exists to agree with the
+    VLM-only one yet (see module docstring)."""
+    element = _element(local_id=1, element_type="figure", page_number=1)
+    parse_result = DoclingParseResult(
+        elements=[element], page_confidence={1: _page_confidence(1)}, page_count=1
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description=None, components=[], connections=["compressor -> TH3"]
+        ),
+    )
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf", cascade_results=[cascade_result])
+    assert results[1].relations[0].cross_source_corroborated is False
+    assert results[1].relations[0].corroboration_count == 0
+
+
 def test_extract_kg_candidates_omits_elements_with_no_candidates() -> None:
     element = _element(local_id=1, text="Nothing of interest here.")
     parse_result = DoclingParseResult(

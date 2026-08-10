@@ -179,6 +179,48 @@ def test_small_picture_reclassified_as_icon_and_parented_to_preceding_text() -> 
     assert icon.parent_local_id == result.elements[0].local_id
 
 
+def test_icon_without_text_on_same_page_falls_back_to_last_text_seen_on_earlier_page() -> None:
+    """[SA1.2 fix, real bug found in document_id=3] A page consisting
+    entirely of icons (e.g. a pictogram legend continuing from the previous
+    page, zero paragraph/list/heading elements of its own) must NOT get
+    `parent_id=NULL` — it should fall back to the last text/heading element
+    seen anywhere earlier in the document, matching the real "page 8 of
+    Zeggo VRV IV REYQ" scenario (6 icons, all orphaned before this fix)."""
+    items = [
+        _item("section_header", "#/texts/0", text="Pictograms", page_no=1, level=1),
+        _item("text", "#/texts/1", text="See legend below.", page_no=1),
+        # Page 2: nothing but icons — no text/list/heading element at all.
+        _item("picture", "#/pictures/0", page_no=2, bbox=(10, 780, 30, 765)),
+        _item("picture", "#/pictures/1", page_no=2, bbox=(40, 780, 60, 765)),
+    ]
+    doc = FakeDoc(items, page_sizes={1: (609.0, 793.0), 2: (609.0, 793.0)})
+    confidence = _confidence_report({1: _page_scores(), 2: _page_scores()})
+
+    result = dp.map_document_to_elements(doc, confidence, page_count=2)
+
+    heading, paragraph, icon_1, icon_2 = result.elements
+    assert icon_1.element_type == "icon"
+    assert icon_2.element_type == "icon"
+    # Falls back to the last text/heading element seen anywhere earlier in
+    # the document (the page-1 paragraph), not NULL.
+    assert icon_1.parent_local_id == paragraph.local_id
+    assert icon_2.parent_local_id == paragraph.local_id
+
+
+def test_icon_before_any_text_in_document_stays_parentless() -> None:
+    """No text/heading has been seen anywhere yet (same-page AND
+    document-wide fallback both empty) — `parent_local_id` correctly stays
+    `None` rather than erroring."""
+    items = [_item("picture", "#/pictures/0", page_no=1, bbox=(10, 780, 30, 765))]
+    doc = FakeDoc(items, page_sizes={1: (609.0, 793.0)})
+    confidence = _confidence_report({1: _page_scores()})
+
+    result = dp.map_document_to_elements(doc, confidence, page_count=1)
+
+    assert result.elements[0].element_type == "icon"
+    assert result.elements[0].parent_local_id is None
+
+
 def test_large_picture_stays_figure_not_icon() -> None:
     items = [
         _item(

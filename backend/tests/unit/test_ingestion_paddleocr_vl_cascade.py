@@ -91,6 +91,22 @@ def test_first_prediction_to_dict_unrecognized_object() -> None:
     assert pv._first_prediction_to_dict(object()) == {}
 
 
+def test_first_prediction_to_dict_prefers_markdown_over_json_without_markdown_key() -> None:
+    """Regression test for the SA1.2 finding (`visual_description.description`
+    NULL for 386/386 real elements, document_id=3): a real PaddleX
+    `Result.json` is always `{"res": {...}}` (never has a top-level
+    "markdown"/"text" key, see `paddlex/inference/common/result/mixin.py`
+    `JsonMixin`) — `.markdown` must be checked first, or the real output is
+    silently discarded (see `_first_prediction_to_dict` docstring)."""
+    prediction = SimpleNamespace(
+        json={"res": {"parsing_res_list": []}},
+        markdown={"markdown_texts": "## real content", "page_index": 0},
+    )
+    assert pv._first_prediction_to_dict(prediction) == {
+        "markdown": {"markdown_texts": "## real content", "page_index": 0}
+    }
+
+
 def test_extract_markdown_text_string() -> None:
     assert pv._extract_markdown_text({"markdown": "# Title"}) == "# Title"
 

@@ -15,7 +15,9 @@ for the (now largely hypothetical, see next paragraph) same-process case.
 now **only** runs Docling — `PADDLE_OCR_VL_BACKEND=local` is **not used** by
 `backend-worker-gpu` (`remote_api` is the only backend it's configured with,
 pointing at the separate `paddleocr-vl-service`, see
-`vrf-chat/paddleocr-vl-service/`). Root cause: `paddlepaddle-gpu` (needed
+`vrf-chat/backend/paddleocr-vl-service/`, moved here from a `vrf-chat/`
+top-level sibling per SA1.2 folder-structure review, 2026-08-09). Root
+cause: `paddlepaddle-gpu` (needed
 by `LocalPaddleOCRVLClient`'s layout submodel) and `torch` (used by
 Docling) vendor incompatible `nvidia-nccl-cu12` pip packages into the same
 venv, breaking `import torch` entirely — a packaging conflict, not a VRAM
@@ -35,7 +37,7 @@ with `ModuleNotFoundError` — this is intentional, not a latent bug.
 PaddleOCR-VL's core pipeline runs entirely on PaddlePaddle's own inference
 engine, `torch` was never actually a hard requirement despite earlier
 assumption): real single-image inference peaked at **~5.98GB VRAM out of
-6.14GB** (RTX 3060 6GB) — see `vrf-chat/paddleocr-vl-service/README.md` for
+6.14GB** (RTX 3060 6GB) — see `vrf-chat/backend/paddleocr-vl-service/README.md` for
 full detail. This is far higher than the design doc §4's "~2.5-4GB"
 estimate and leaves only ~150MB headroom, a critical operational
 consideration flagged separately.
@@ -226,19 +228,37 @@ def _first_prediction_to_dict(prediction: Any) -> dict[str, Any]:
     """Best-effort, defensive extraction of a PaddleX `Result`-like object
     into a plain dict, kept separate from `_run_predict` so it IS unit
     tested (with fakes) even though real prediction objects aren't
-    available in this dev environment (see module docstring). Uses
-    `getattr` throughout because the exact PaddleX `Result` schema for this
-    pipeline has not been confirmed against real output yet — to be
-    corrected during the I1.6 live run if it differs.
+    available in this dev environment (see module docstring).
+
+    **[SA1.2 finding, 2026-08-09 — real bug, fixed]** `.markdown` MUST be
+    checked before `.json`. The original (I1.4) ordering checked `.json`
+    first on the (wrong) assumption that a real PaddleX `Result.json` would
+    itself be shaped like `{"markdown": {...}}`. Reading the actual
+    `paddlex` source (`inference/common/result/mixin.py` `JsonMixin`)
+    confirms `.json` is **always** `{"res": <the whole result object,
+    recursively serialized>}` for every PaddleX pipeline that uses this
+    mixin (including `PaddleOCRVLResult`) — it never has a top-level
+    `"markdown"`/`"text"` key. Since `.json` is a dict, the old
+    `isinstance(as_json, dict): return as_json` branch always won,
+    permanently shadowing the real `.markdown` property (which DOES return
+    `{"markdown_texts": "...", ...}` for this pipeline, per
+    `paddlex/inference/pipelines/paddleocr_vl/result.py` `_to_markdown`).
+    Net effect confirmed against real ingested data (document_id=3, SA1.2
+    spot-check): `visual_description.description` was NULL for 386/386
+    Stage 4 elements — every `describe_figure`/`reparse_table` call
+    silently discarded its real output. The paddleocr-vl-service's own
+    manual live-verification transcript (README.md) printed `.markdown`
+    directly, not the return value of this function, which is why that
+    check didn't catch the bug — see README "SA1.2 finding" note.
     """
     if prediction is None:
         return {}
+    markdown = getattr(prediction, "markdown", None)
+    if isinstance(markdown, str | dict):
+        return {"markdown": markdown}
     as_json = getattr(prediction, "json", None)
     if isinstance(as_json, dict):
         return as_json
-    markdown = getattr(prediction, "markdown", None)
-    if markdown is not None:
-        return {"markdown": markdown}
     if isinstance(prediction, dict):
         return prediction
     return {}

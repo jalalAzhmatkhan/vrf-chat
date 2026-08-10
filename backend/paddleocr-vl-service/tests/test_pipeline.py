@@ -67,6 +67,22 @@ def test_first_prediction_to_dict_unrecognized() -> None:
     assert pl._first_prediction_to_dict(object()) == {}
 
 
+def test_first_prediction_to_dict_prefers_markdown_over_json_without_markdown_key() -> None:
+    """Regression test for the SA1.2 finding: a real PaddleX `Result.json`
+    is always `{"res": {...}}` (never has a top-level "markdown"/"text"
+    key) — `.markdown` must be checked first, or the real output is
+    silently discarded (see `_first_prediction_to_dict` docstring)."""
+    from types import SimpleNamespace
+
+    prediction = SimpleNamespace(
+        json={"res": {"parsing_res_list": []}},
+        markdown={"markdown_texts": "## real content", "page_index": 0},
+    )
+    assert pl._first_prediction_to_dict(prediction) == {
+        "markdown": {"markdown_texts": "## real content", "page_index": 0}
+    }
+
+
 def test_extract_markdown_text_dict_markdown_texts() -> None:
     assert pl._extract_markdown_text({"markdown": {"markdown_texts": "hi"}}) == "hi"
 

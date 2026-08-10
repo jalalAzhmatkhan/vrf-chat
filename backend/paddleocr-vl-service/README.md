@@ -21,6 +21,40 @@ dependency resolution from `backend/`'s) sidesteps the conflict via the
 Docker container boundary rather than needing a custom subprocess/IPC
 isolation mechanism.
 
+## ⚠️ [FIXED, SA1.2 2026-08-09] `visual_description.description` was NULL for every real element
+
+System Analyst's SA1.2 spot-check against real ingested data (document_id=3,
+286-page Zeggo VRV IV REYQ) found `visual_description.description` NULL for
+**386/386** (100%) of the elements this service actually processed via
+`describe_figure`/`reparse_table` — the entire point of Stage 4
+(icon/figure becomes *searchable*, `CLAUDE.md` §4) was silently defeated,
+despite every cascade call genuinely executing and the pipeline reporting
+success end-to-end.
+
+**Root cause**: `app/pipeline.py` `_first_prediction_to_dict` checked
+`.json` before `.markdown`. Reading the real `paddlex` source
+(`paddlex/inference/common/result/mixin.py` `JsonMixin`) shows `.json` is
+**always** `{"res": <the whole result, recursively serialized>}` for every
+PaddleX pipeline using this mixin (including `PaddleOCRVLResult`) — it
+never has a top-level `"markdown"`/`"text"` key. Since `.json` is a dict,
+the old `isinstance(as_json, dict): return as_json` branch always won,
+permanently shadowing the real `.markdown` property (which DOES return
+`{"markdown_texts": "...", ...}`, per
+`paddlex/inference/pipelines/paddleocr_vl/result.py` `_to_markdown`). The
+"Live verification" transcript below (`result.json ==
+{"markdown": {"markdown_texts": ...}}`) was **inaccurate as written** — it
+came from printing `.markdown` directly during manual verification, not
+from exercising `_first_prediction_to_dict` itself, which is why the
+discrepancy wasn't caught at the time.
+
+**Fix**: `.markdown` is now checked first (see `_first_prediction_to_dict`
+docstring for the full explanation + a regression test asserting this
+ordering: `test_first_prediction_to_dict_prefers_markdown_over_json_without_markdown_key`).
+Same fix applied to the structurally-identical function in
+`backend/app/ingestion/paddleocr_vl_cascade.py`. Re-verified against a
+clean re-ingest of document_id=3 — see
+`backend/docs/i1.10-e2e-findings.md` for the post-fix results.
+
 ## Live verification (I1.10) — what was actually confirmed, not assumed
 
 Per explicit instruction not to assume the isolated-venv fix actually

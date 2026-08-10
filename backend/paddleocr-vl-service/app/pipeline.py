@@ -84,17 +84,29 @@ def _first_prediction_to_dict(prediction: Any) -> dict[str, Any]:
     """Same best-effort mapping as `backend/app/ingestion/paddleocr_vl_cascade.py`
     `_first_prediction_to_dict` — kept independent (no shared code between
     the two projects, see config.py docstring) but algorithmically
-    identical, and now confirmed correct against real output (see
-    README.md): real `PaddleOCRVL.predict()` output exposes
-    `result.json == {"markdown": {"markdown_texts": "...", ...}, ...}`."""
+    identical.
+
+    **[SA1.2 finding, 2026-08-09 — real bug, fixed]** The README's I1.10
+    claim that `result.json == {"markdown": {"markdown_texts": ...}}` was
+    **wrong** — that transcript came from printing `result.markdown`
+    directly during manual live verification, not from exercising this
+    function. The real `paddlex` `JsonMixin.json` property (used by
+    `PaddleOCRVLResult`, confirmed by reading
+    `paddlex/inference/common/result/mixin.py`) always returns
+    `{"res": <recursively-serialized result>}` — it never has a top-level
+    `"markdown"` key. Because `.json` is a dict, checking it before
+    `.markdown` (the original ordering) always won and silently discarded
+    the real markdown output. Confirmed against real ingested data
+    (`visual_description.description` NULL for 386/386 Stage 4 elements in
+    document_id=3) — `.markdown` MUST be checked first."""
     if prediction is None:
         return {}
+    markdown = getattr(prediction, "markdown", None)
+    if isinstance(markdown, str | dict):
+        return {"markdown": markdown}
     as_json = getattr(prediction, "json", None)
     if isinstance(as_json, dict):
         return as_json
-    markdown = getattr(prediction, "markdown", None)
-    if markdown is not None:
-        return {"markdown": markdown}
     if isinstance(prediction, dict):
         return prediction
     return {}

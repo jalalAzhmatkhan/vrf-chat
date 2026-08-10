@@ -25,6 +25,25 @@
 
 FROM python:3.12-slim AS base
 
+# [F4, 2026-08-10 — real bug found during first-ever docker build+run
+# verification of this service, QA phase-1-qa-report.md §2] `python:3.12-slim`
+# is missing native shared libraries `paddlepaddle-gpu`'s compiled core
+# (`libpaddle.so`) and `opencv-contrib-python` (`cv2`) need at import time —
+# this had never actually been caught before because every prior "live
+# verification" ran in a WSL-native venv, whose host Ubuntu already had
+# these libraries installed system-wide, not in this minimal Debian-slim
+# image. Confirmed live: `import paddle` failed with
+# `ImportError: libgomp.so.1: cannot open shared object file` before this
+# fix. `libgl1`/`libglib2.0-0` are the other well-known common
+# `opencv-python`-on-slim-Debian gotchas, added proactively (same class of
+# issue, not yet hit in the /health-only check but predictable) — see
+# README.md for what was and wasn't independently confirmed to fail.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 ENV UV_COMPILE_BYTECODE=1 \

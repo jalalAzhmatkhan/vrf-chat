@@ -55,6 +55,121 @@ Same fix applied to the structurally-identical function in
 clean re-ingest of document_id=3 — see
 `backend/docs/i1.10-e2e-findings.md` for the post-fix results.
 
+## ⚠️ [F2/F3, QA phase-1-qa-report.md §1.4/§2.5, 2026-08-10] Residual 5/386 NULLs — root-caused, NOT a mapping bug, no safe fix shipped yet
+
+QA re-verification found the daemon serving `/describe_figure` at the time
+of their audit predated the `_first_prediction_to_dict` fix above (F3 —
+`uvicorn` without `--reload` never picks up file changes; the process had
+simply never been restarted since before commit `fa02029`). **Fixed**: the
+daemon is now restarted after every code change that touches this service
+(a process discipline note, not a code change) — confirmed live:
+`/describe_figure` for element 5184 (a real, content-rich piping schematic
+QA specifically flagged) still returned `description: null` even
+**against a freshly-restarted, current-code daemon** — proving the residual
+5/386 NULLs are independent of daemon staleness.
+
+**Root cause of the residual 5/386, confirmed via direct model
+instrumentation** (calling `pipeline.predict()` directly, bypassing the
+HTTP layer, printing the raw `.json`/`.markdown` PaddleX `Result`): for
+these specific elements (large, full-bleed technical schematics filling
+nearly the entire cropped region — see QA's table, elements 5184/5186/5188
+in particular), the layout-detection submodel (`PP-DocLayoutV3`) finds
+**no image/chart/table region at all** — `parsing_res_list` contains only
+the page footer text (or, at very low `layout_threshold` values down to
+0.05, a couple of trivial incidental text fragments like a stray page
+number). Since markdown rendering only emits content for recognized
+layout blocks, no VL recognition ever runs on the actual diagram, and
+`markdown_texts` stays empty. This is a genuine **upstream layout-model
+limitation** on this specific class of content (dense, edge-to-edge
+technical line-art with no "photo-like" white-space boundary), not a
+code/mapping bug — the SA1.2-fixed ordering bug is confirmed fully
+resolved for the other 381/386 (98.7%) elements.
+
+**Fallback investigated, NOT shipped (safety judgment call)**: forcing
+`use_layout_detection=False` with an explicit `prompt_label` (e.g.
+`"chart"`) bypasses layout detection and treats the whole crop as one
+region — this does appear to eventually process real content (GPU
+actively computing, no errors), but at a dramatically higher latency than
+the normal per-region path: none of several live attempts (1024 tokens,
+256 tokens, 256 tokens on an image downscaled to an 800px long edge)
+completed within 7-22+ minutes before being killed — versus ~5-90s for the
+normal layout-detection-enabled path. Shipping this as an automatic
+fallback without a proven latency bound risks making Stage 4 pathologically
+slow (or blocking the whole cascade stage) for exactly the elements it's
+meant to help — a worse outcome than the current graceful "stays NULL,
+not searchable" degradation for this small (~1.3%) subset. **Left as
+explicitly open follow-up work**, not silently dropped: candidate next
+steps are tuning generation sampling params, trying an older
+`pipeline_version`, or a lighter-weight non-PaddleOCR-VL captioning model
+for this narrow fallback case specifically.
+
+## ⚠️ [F4, QA phase-1-qa-report.md §2.1, 2026-08-10] Official `docker compose --profile gpu` path — now verified, 3 real issues found and fixed/documented
+
+Prior to this, `docker compose --profile gpu build`/`up` had **never
+actually been run** for this service or `backend-worker-gpu` — every prior
+"live verification" (I1.6, I1.10, the SA1.2 re-ingest) used a bare WSL
+process/script directly, despite the whole point of the Opsi 3 decision
+being a container boundary. QA flagged this gap explicitly; here is what
+running it for the first time actually found:
+
+1. **Build-context bug (fixed)**: `backend/.dockerignore` didn't account
+   for this service having moved to `backend/paddleocr-vl-service/`
+   (SA1.2 folder-structure review) — `backend-api`/`backend-worker`'s
+   build context was transferring this service's ~7GB `.venv` on every
+   build. Fixed by adding an explicit `paddleocr-vl-service/` exclusion to
+   `backend/.dockerignore`. Separately, **this service never had its own
+   `.dockerignore` at all** (a genuine, previously-undiscovered gap — its
+   own Docker build had simply never been attempted) — added one, `.venv/`
+   included, fixing the same class of bug for `docker compose --profile gpu
+   build paddleocr-vl-service` itself.
+2. **Missing native shared libraries (fixed)**: `python:3.12-slim` (this
+   Dockerfile's base image) is missing `libgomp.so.1` — `import paddle`
+   failed immediately inside a freshly-built container with
+   `ImportError: libgomp.so.1: cannot open shared object file`, a
+   completely blocking issue (the service would never have worked via
+   Docker at all, `/health` alone doesn't exercise this import path since
+   it's lazy-loaded). This had never been caught before because every
+   prior real inference verification ran in a WSL-native venv, whose host
+   Ubuntu already had `libgomp1` installed system-wide. Fixed by adding
+   `apt-get install libgomp1 libgl1 libglib2.0-0` (the latter two are the
+   other well-known `opencv-contrib-python`-on-slim-Debian gotchas, added
+   proactively). Confirmed fixed live: `paddle.is_compiled_with_cuda()`
+   returns `True` and `cv2` imports cleanly inside the rebuilt container.
+3. **GPU passthrough confirmed working end-to-end via Docker**:
+   `docker compose --profile gpu up -d paddleocr-vl-service` — container
+   reaches Docker's own `HEALTHCHECK` "healthy" state, `GET /health` OK,
+   `paddle.device.cuda.device_count()` returns `1` inside the container.
+   The async/threadpool fix (F3's predecessor) was also reconfirmed live
+   in the real containerized deployment specifically (not just bare-metal):
+   `/health` stayed responsive throughout a long-running real inference
+   request. `backend-worker-gpu` was spot-checked the same way
+   (`docker run --gpus all ... python -c "import torch; torch.cuda.is_available()"`
+   → `True`, `import docling` → OK).
+
+**⚠️ NOT fully resolved — flagged as an open, unexplained finding, not
+swept under the rug**: two real, complete `POST /describe_figure` calls
+through the **freshly-started container** (one a complex diagram, one a
+trivial small icon — different content, same anomaly) each ran for
+**20+ minutes without completing** (killed manually both times; no error
+in logs, CPU pinned near 100% the whole time — i.e. NOT a deadlock, still
+genuinely computing) before I stopped waiting. Immediately after, the
+**exact same small icon** through the **bare-metal daemon** (also a cold
+start — model not yet loaded) completed in **78.7 seconds** with a real,
+non-null description. This isolates the anomaly to the containerized
+deployment specifically, but the root cause is **not confirmed** within
+this session — plausible candidates (untested): CPU thread/core
+availability differences between the container's cgroup and the bare WSL
+process (paddle/BLAS libraries often auto-configure their internal thread
+pool differently inside a container namespace), or some other
+container-specific resource constraint. **This is a real, unresolved
+production-readiness concern for the official Docker deployment path** —
+it now demonstrably *works* (builds, starts, passes healthchecks, GPU
+passthrough confirmed), but real-inference latency inside a container has
+NOT been shown to be viable at the throughput this project needs. Flagged
+explicitly for follow-up investigation before relying on
+`docker compose --profile gpu up` for a real multi-document ingestion run
+— the bare-metal WSL process remains the verified-fast path for now.
+
 ## Live verification (I1.10) — what was actually confirmed, not assumed
 
 Per explicit instruction not to assume the isolated-venv fix actually
@@ -171,12 +286,21 @@ out OOM entirely.
   `RLock` serializes them by design (§ `app/pipeline.py`
   `PaddleOCRVLPipeline` docstring), so this is expected/intentional
   behavior, not an untested gap, but worth stating explicitly.
-- The full Docker image build (`docker build` of this service's
+- ~~The full Docker image build (`docker build` of this service's
   `Dockerfile`) — dependency resolution was verified via `uv sync` in a
-  WSL-native venv (same rationale as I1.6's Docling verification: identical
-  GPU/driver/dependency versions, faster than a full image build+model
-  download cycle), not via an actual `docker build` + `docker run`. Same
-  scope boundary already accepted for `backend-worker-gpu` in I1.4/I1.6.
+  WSL-native venv..., not via an actual `docker build` + `docker run`.~~ —
+  **now verified** (F4, QA phase-1-qa-report.md §2.1, 2026-08-10):
+  `docker compose --profile gpu build`/`up` actually run, container reaches
+  Docker's own `HEALTHCHECK` "healthy" state, GPU passthrough confirmed
+  inside the container (`paddle.is_compiled_with_cuda()==True`). Found and
+  fixed 2 real, previously-undiscovered bugs in the process (missing
+  `.dockerignore`, missing `libgomp1`/`libgl1`/`libglib2.0-0` native
+  dependencies) — see the F4 section above. **Still open**: real-inference
+  latency inside the container was NOT verified viable (20+ minute stalls
+  observed, root cause unconfirmed) — see F4 section above for full detail.
+  This is a materially different, more cautious conclusion than the
+  pre-F4 state of this document, which had assumed `uv sync` parity was a
+  sufficient stand-in for a real container run.
 
 ## Why a direct wheel URL for `paddlepaddle-gpu` (`pyproject.toml`)
 

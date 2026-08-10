@@ -443,6 +443,151 @@ def test_extract_from_text_connector_id_space_and_dash_variants() -> None:
 
 
 # ---------------------------------------------------------------------------
+# SA-KG.1 cross-vendor vocabulary union (Daikin R#T/X#M/two-letter error
+# codes, alongside the existing Mitsubishi TH#/CN#/single-letter forms)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_from_text_sensor_id_daikin() -> None:
+    element = _element(text="Check thermistor R1T and R14T for continuity.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert {"R1T", "R14T"} <= sensor_names
+    r1t = next(e for e in result.entities if e.name == "R1T")
+    assert r1t.extraction_method == kg.EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN
+    assert r1t.confidence == kg.CONFIDENCE_SENSOR_ID
+
+
+def test_extract_from_text_sensor_id_daikin_space_and_dash_variants() -> None:
+    # Separator allowed only between the letter prefix and the digits (same
+    # shape as SENSOR_ID_PATTERN/TH#) — not between the digits and the "T"
+    # suffix.
+    element = _element(text="Sensors R 3T and R-5T are both thermistors.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"R 3T", "R-5T"}
+
+
+def test_extract_from_text_sensor_id_th_and_daikin_both_matched_union() -> None:
+    """[SA-KG.1] Union, not per-vendor: both conventions tried
+    unconditionally in the same element."""
+    element = _element(text="Compare TH3 (old unit) against R3T (new unit).")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"TH3", "R3T"}
+    methods = {e.extraction_method for e in result.entities if e.entity_type == "Sensor"}
+    assert methods == {
+        kg.EXTRACTION_METHOD_REGEX_SENSOR_ID,
+        kg.EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN,
+    }
+
+
+def test_extract_from_text_terminal_id_daikin() -> None:
+    # Deliberately avoids the literal phrase "terminal block" — that free-
+    # text keyword ALSO matches COMPONENT_KEYWORDS (entity_type "Terminal",
+    # extraction_method "dict_keyword"), which would contaminate the
+    # per-pattern assertions below. This test isolates the identifier
+    # regex path.
+    element = _element(text="Connect the wire to X1M and X2M.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    terminal_entities = [e for e in result.entities if e.entity_type == "Terminal"]
+    terminal_names = {e.name for e in terminal_entities}
+    assert terminal_names == {"X1M", "X2M"}
+    assert all(
+        e.extraction_method == kg.EXTRACTION_METHOD_REGEX_TERMINAL_ID for e in terminal_entities
+    )
+    assert all(e.confidence == kg.CONFIDENCE_TERMINAL_ID for e in terminal_entities)
+
+
+def test_extract_from_text_terminal_id_space_and_dash_variants() -> None:
+    element = _element(text="Terminals X 1M and X-2M are both used.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    terminal_names = {e.name for e in result.entities if e.entity_type == "Terminal"}
+    assert terminal_names == {"X 1M", "X-2M"}
+
+
+def test_extract_from_text_error_code_two_letter_daikin_prefix() -> None:
+    """[SA-KG.1, §11.2.1] AH/AJ/UA — the observed Daikin two-letter main
+    codes — now matched (the old single-letter+digit-only pattern missed
+    these entirely)."""
+    element = _element(
+        element_type="table",
+        text="Error code AH: dust detection sensor error. Error code UA: refrigerant type error.",
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert {"AH", "UA"} <= error_code_names
+
+
+def test_extract_from_text_error_code_two_letter_does_not_match_ac() -> None:
+    """[SA-KG.1] Deliberately conservative second-letter restriction
+    ({A,H,J}) — must NOT match "AC" (air conditioning), an extremely common
+    domain abbreviation that a fully generic [A-Z] second letter would
+    wrongly catch as a false-positive ErrorCode candidate."""
+    element = _element(
+        element_type="table", text="Error code: check the AC unit's power supply."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "AC" not in error_code_names
+
+
+def test_extract_from_text_error_code_single_letter_mitsubishi_still_works() -> None:
+    """[SA-KG.1] The original Mitsubishi single-letter+digit form must
+    still work unchanged alongside the new two-letter Daikin form."""
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "P8" in error_code_names
+
+
+def test_extract_from_text_error_code_subcode_extracted_as_separate_candidate() -> None:
+    """[SA-KG.1, §11.2.1] Dual granularity: "A6 - 01" produces BOTH a
+    main-code candidate ("A6") AND a separate main+subcode candidate
+    ("A6-01", normalized — no spaces around the dash)."""
+    element = _element(
+        element_type="table", text="Error code A6 - 01: fan motor locked, check connectors."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = {e.name: e for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "A6" in error_codes
+    assert "A6-01" in error_codes
+    assert error_codes["A6"].extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE
+    assert error_codes["A6-01"].extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE_SUBCODE
+    # same anchor/confidence tier for both granularities (table + anchor)
+    assert error_codes["A6"].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+    assert error_codes["A6-01"].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+    assert error_codes["A6"].context_anchor_matched is True
+    assert error_codes["A6-01"].context_anchor_matched is True
+
+
+def test_extract_from_text_error_code_subcode_two_letter_prefix() -> None:
+    element = _element(element_type="table", text="Error code AH - 03: dust detection error.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "AH" in error_code_names
+    assert "AH-03" in error_code_names
+
+
+def test_extract_from_text_error_code_subcode_justification_span_points_at_real_text() -> None:
+    text = "Error code A6 - 01 appears."
+    element = _element(element_type="table", text=text)
+    result = kg.extract_from_text(element, "doc.pdf")
+    subcode_entity = next(e for e in result.entities if e.name == "A6-01")
+    assert subcode_entity.justification_span is not None
+    start, end = subcode_entity.justification_span
+    assert text[start:end] == "A6 - 01"  # literal raw span, name is normalized separately
+
+
+def test_extract_from_text_error_code_no_subcode_no_subcode_candidate() -> None:
+    element = _element(element_type="table", text="Error code A6 appears with no subcode.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "A6" in error_code_names
+    assert not any("-" in name for name in error_code_names)
+
+
+# ---------------------------------------------------------------------------
 # extract_kg_candidates orchestration
 # ---------------------------------------------------------------------------
 

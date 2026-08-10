@@ -13,3 +13,9 @@ data/object-storage/
 data/chroma/
 *.db
 *.sqlite3
+
+# I1.6 benchmark: sample PDF is a large regenerable artifact (deterministic
+# from source-documents/ + scripts/i1_6_sample_pages.py) — the manifest JSON
+# (which fully describes the sample) and benchmark result JSONs are
+# committed, the compiled PDF binary is not.
+docs/i1.6-sample-50pages.pdf

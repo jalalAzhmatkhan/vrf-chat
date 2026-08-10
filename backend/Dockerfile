@@ -9,12 +9,30 @@
 # All dependency installation goes through `uv` (never bare pip/poetry), per
 # CLAUDE.md.
 #
-# NOTE (worker-gpu, Fase 1): this stage still uses the same slim Python base
-# as api/worker. Once GPU-heavy dependencies (torch, docling, paddleocr-vl)
-# are added in the ingestion pipeline work, this stage's base image will
-# likely need to switch to an nvidia/cuda-enabled base (e.g.
-# `nvidia/cuda:12.x-runtime-ubuntu22.04` + Python) — tracked as follow-up,
-# not needed for the B0.5 "minimal start-up" skeleton requirement.
+# NOTE (worker-gpu, I1.4 update): GPU-heavy dependencies (torch, docling,
+# paddleocr-vl) are now added (see pyproject.toml) — the B0.5 TODO above
+# ("likely need to switch to an nvidia/cuda-enabled base image") was
+# investigated and turned out to be UNNECESSARY: `uv.lock` is a universal
+# (multi-platform) lock, and torch's Linux-marker dependencies already
+# include `cuda-bindings`/`cuda-toolkit[cublas,cudart,cufft,...]` (see
+# `uv.lock`, `name = "torch"` entry, `marker = "sys_platform == 'linux'"`) —
+# i.e. `uv sync` inside a Linux container resolves a CUDA-capable torch
+# wheel with the CUDA runtime bundled as pip dependencies, no system-level
+# CUDA toolkit/base image required. What IS required (host-level, not
+# image-level) is the NVIDIA Container Toolkit + driver on the Docker host —
+# verified working from WSL: `docker run --rm --gpus all
+# nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` correctly reports the RTX
+# 3060 (6144MiB) from inside a plain container. `worker-gpu` therefore stays
+# on the same `base` (python:3.12-slim) stage as api/worker.
+#
+# NOT YET verified: an actual `uv sync --frozen` build of THIS Dockerfile
+# inside WSL Docker, confirming `torch.cuda.is_available() is True` inside
+# the built worker-gpu container (as opposed to the ad-hoc nvidia/cuda
+# smoke-test image above) — deferred to the I1.6 WSL GPU benchmark, which
+# builds/runs this image for real anyway. On the Windows-native dev venv
+# used for I1.1-I1.4 development, `uv add docling` resolved a CPU-only
+# torch wheel (`2.13.0+cpu`) — expected/correct for Windows dev (no CUDA
+# toolkit resolution attempted there), not a sign of a lock-file problem.
 
 FROM python:3.12-slim AS base
 

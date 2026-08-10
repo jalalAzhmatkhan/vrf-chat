@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 
 from sqlalchemy import delete
@@ -127,6 +128,109 @@ def _parse_markdown_table(markdown: str | None) -> list[dict[str, str]]:
     return rows
 
 
+class _HTMLTableCellParser(HTMLParser):
+    """Minimal `<table>`/`<tr>`/`<td>`/`<th>` extractor for real PaddleOCR-VL
+    table-reparse output (`extraction_method='docling+paddle_table'`, QA
+    phase-1-qa-report.md §1.3 F1) — e.g.
+    `<table border=1 ...><tr><td colspan="2">Warning</td></tr>...`, NOT
+    markdown. Uses stdlib `html.parser` (no new dependency) rather than a
+    full HTML tree — this module only ever needs flat row/cell text, never
+    nested-table or block-level structure. `colspan` is expanded (the
+    cell's text repeated across every column it spans) so downstream
+    consumers never need to special-case merged cells. `<img>` tags
+    naturally disappear (they produce no `handle_data` text) — dropping
+    embedded images from `rows` is intentional; the image itself is not
+    lost, `content_text` still preserves the full raw HTML.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._current_row: list[str] | None = None
+        self._current_cell_parts: list[str] | None = None
+        self._current_colspan = 1
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._current_row = []
+        elif tag in ("td", "th"):
+            self._current_cell_parts = []
+            self._current_colspan = 1
+            for name, value in attrs:
+                if name == "colspan" and value:
+                    try:
+                        self._current_colspan = max(1, int(value))
+                    except ValueError:
+                        self._current_colspan = 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("td", "th") and self._current_row is not None:
+            text = "".join(self._current_cell_parts or []).strip()
+            self._current_row.extend([text] * self._current_colspan)
+            self._current_cell_parts = None
+        elif tag == "tr" and self._current_row is not None:
+            self.rows.append(self._current_row)
+            self._current_row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell_parts is not None:
+            self._current_cell_parts.append(data)
+
+
+def _parse_html_table(html_text: str) -> list[dict[str, str]]:
+    """Real PaddleOCR-VL table-reparse HTML -> `rows: list[dict]` (see
+    `_HTMLTableCellParser`). Unlike `_parse_markdown_table`, keys are
+    positional (`col_0`, `col_1`, ...) rather than inferred from the first
+    row: real `docling+paddle_table` HTML output commonly has no true
+    header row at all (e.g. a `colspan=2` "Warning" title row is not a set
+    of column names) — inferring semantic headers from it would be
+    misleading, unlike markdown pipe-tables where the first row genuinely
+    is the header by syntax convention."""
+    parser = _HTMLTableCellParser()
+    try:
+        parser.feed(html_text)
+    except Exception:  # pragma: no cover - defensive against malformed HTML
+        return []
+
+    raw_rows = [row for row in parser.rows if row]
+    if not raw_rows:
+        return []
+
+    max_cols = max(len(row) for row in raw_rows)
+    return [
+        {f"col_{i}": (row[i] if i < len(row) else "") for i in range(max_cols)}
+        for row in raw_rows
+    ]
+
+
+def _parse_table_rows(content_text: str | None) -> list[dict[str, str]]:
+    """Format-detecting dispatcher — see `03-retrieval-chunking.md` §3 and
+    QA phase-1-qa-report.md §1.3 (F1). `elements.text` for a table can be
+    EITHER Docling's native markdown export OR, when Stage 4 table-reparse
+    (`extraction_method='docling+paddle_table'`) overwrote it, real
+    PaddleOCR-VL HTML output (`app/ingestion/canonical_store.py`
+    `store_pages_and_elements`: `text = cascade_result.table_reparse.markdown
+    or text` — despite the `TableReparseResult.markdown` field name, the
+    real value is HTML, not markdown, confirmed against real data).
+
+    Detection is "`<table` appears anywhere" (case-insensitive), NOT merely
+    a prefix check — real PaddleOCR-VL output sometimes prepends a caption
+    OUTSIDE the table itself (e.g. `<div style="text-align: center;">
+    Parameter [A] Refrigerant amount...</div>\\n\\n<table ...>`, a real
+    example found during F1 fix verification against document_id=3, chunk
+    id 3734) which a strict `startswith("<table")` check would miss and
+    silently fall through to the markdown parser (returning `[]` again —
+    exactly the bug this fix addresses). `_parse_html_table`'s
+    `HTMLParser`-based extraction only ever looks at `tr`/`td`/`th` tags,
+    so feeding it the caption `<div>` alongside the table is harmless (the
+    `<div>` text is simply never emitted as row data)."""
+    if not content_text:
+        return []
+    if "<table" in content_text.lower():
+        return _parse_html_table(content_text)
+    return _parse_markdown_table(content_text)
+
+
 def _new_chunk(element: ChunkableElement, chunk_type: str) -> ChunkDraft:
     return ChunkDraft(
         chunk_type=chunk_type,
@@ -174,7 +278,7 @@ def build_chunks(elements: list[ChunkableElement]) -> list[ChunkDraft]:
             chunk.content_text = element.text or ""
             chunk.content_structured = {
                 "markdown": element.text,
-                "rows": _parse_markdown_table(element.text),
+                "rows": _parse_table_rows(element.text),
             }
             chunk.element_ids = [element.element_id]
             chunks.append(chunk)

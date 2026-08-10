@@ -1,0 +1,200 @@
+"""Unit tests for `app/agent/answer_postprocess.py` (C2.3) — the
+non-negotiable §5.1 layer-3 marker validation gate + the "never invent"
+safety net."""
+
+from __future__ import annotations
+
+from app.agent import answer_postprocess as pp
+from app.agent.context_builder import BuiltContext, ContextElement
+from app.agent.schemas import Citation, TechnicalAnswer, Warning
+
+
+def _element(element_id: int, **overrides: object) -> ContextElement:
+    base: dict[str, object] = dict(
+        element_id=element_id,
+        element_type="paragraph",
+        text="Some element text",
+        image_uri=None,
+        visual_description=None,
+        document_id=3,
+        page=238,
+    )
+    base.update(overrides)
+    return ContextElement(**base)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# postprocess_answer — marker validation
+# ---------------------------------------------------------------------------
+
+
+def test_postprocess_answer_no_markers_unchanged() -> None:
+    answer = TechnicalAnswer(answer="Just plain text.", confidence=0.8)
+    context = BuiltContext()
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.answer == "Just plain text."
+    assert result.stripped_element_ids == ()
+    assert result.backfilled_element_ids == ()
+
+
+def test_postprocess_answer_valid_marker_kept_and_citation_backfilled() -> None:
+    element = _element(4961, element_type="icon", image_uri="s3://bucket/icon.png")
+    context = BuiltContext(elements_by_id={4961: element})
+    answer = TechnicalAnswer(answer="Press the button {{el:4961}} to continue.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert "{{el:4961}}" in result.answer.answer
+    assert result.stripped_element_ids == ()
+    assert result.backfilled_element_ids == (4961,)
+    assert len(result.answer.citations) == 1
+    citation = result.answer.citations[0]
+    assert citation.element_id == "4961"
+    assert citation.document_id == "3"
+    assert citation.page == 238
+    assert citation.element_type == "icon"
+    assert citation.image_uri == "s3://bucket/icon.png"
+
+
+def test_postprocess_answer_invalid_marker_stripped() -> None:
+    context = BuiltContext(elements_by_id={})
+    answer = TechnicalAnswer(answer="See figure {{el:9999}} for details.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert "{{el:9999}}" not in result.answer.answer
+    assert result.stripped_element_ids == (9999,)
+    assert result.answer.citations == []
+    assert "See figure" in result.answer.answer
+    assert "for details." in result.answer.answer
+
+
+def test_postprocess_answer_mixed_valid_and_invalid_markers() -> None:
+    context = BuiltContext(elements_by_id={1: _element(1)})
+    answer = TechnicalAnswer(
+        answer="Refer to {{el:1}} and also {{el:2}}.", confidence=0.9
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert "{{el:1}}" in result.answer.answer
+    assert "{{el:2}}" not in result.answer.answer
+    assert result.stripped_element_ids == (2,)
+    assert result.backfilled_element_ids == (1,)
+
+
+def test_postprocess_answer_marker_already_has_citation_not_duplicated() -> None:
+    element = _element(1)
+    context = BuiltContext(elements_by_id={1: element})
+    existing_citation = Citation(
+        document_id="3", page=238, element_id="1", element_type="paragraph", quote="custom quote"
+    )
+    answer = TechnicalAnswer(
+        answer="See {{el:1}}.", confidence=0.9, citations=[existing_citation]
+    )
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert len(result.answer.citations) == 1
+    assert result.answer.citations[0].quote == "custom quote"
+    assert result.backfilled_element_ids == ()
+
+
+def test_postprocess_answer_collapses_double_spaces_left_by_stripped_marker() -> None:
+    context = BuiltContext(elements_by_id={})
+    answer = TechnicalAnswer(answer="See {{el:1}} here.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert "  " not in result.answer.answer
+
+
+def test_postprocess_answer_non_visual_element_no_image_fields() -> None:
+    element = _element(1, element_type="table")
+    context = BuiltContext(elements_by_id={1: element})
+    answer = TechnicalAnswer(answer="See {{el:1}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    citation = result.answer.citations[0]
+    assert citation.image_uri is None
+    assert citation.visual_description is None
+
+
+def test_postprocess_answer_element_page_none_defaults_to_zero() -> None:
+    element = _element(1, page=None)
+    context = BuiltContext(elements_by_id={1: element})
+    answer = TechnicalAnswer(answer="See {{el:1}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.citations[0].page == 0
+
+
+# ---------------------------------------------------------------------------
+# enforce_never_invent_safety_net
+# ---------------------------------------------------------------------------
+
+
+def test_safety_net_already_refused_left_untouched() -> None:
+    answer = TechnicalAnswer(answer="I don't know.", confidence=0.0, refused=True)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=1, any_chunks_retrieved=False
+    )
+
+    assert result is answer
+
+
+def test_safety_net_no_tool_calls_conversational_turn_untouched() -> None:
+    answer = TechnicalAnswer(answer="Hello! How can I help?", confidence=0.9)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=0, any_chunks_retrieved=False
+    )
+
+    assert result.refused is False
+    assert result is answer
+
+
+def test_safety_net_tool_called_but_nothing_retrieved_and_no_citations_forces_refuse() -> None:
+    answer = TechnicalAnswer(answer="Here is a made-up answer.", confidence=0.9)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=1, any_chunks_retrieved=False
+    )
+
+    assert result.refused is True
+    assert any(w.message == pp.NO_EVIDENCE_WARNING.message for w in result.warnings)
+
+
+def test_safety_net_tool_called_and_chunks_retrieved_not_forced() -> None:
+    answer = TechnicalAnswer(answer="Grounded answer.", confidence=0.9)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=1, any_chunks_retrieved=True
+    )
+
+    assert result.refused is False
+
+
+def test_safety_net_tool_called_no_chunks_but_has_citations_not_forced() -> None:
+    citation = Citation(document_id="3", page=1, element_id="1", element_type="paragraph")
+    answer = TechnicalAnswer(answer="Answer with citation.", confidence=0.9, citations=[citation])
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=1, any_chunks_retrieved=False
+    )
+
+    assert result.refused is False
+
+
+def test_no_evidence_warning_severity_is_note() -> None:
+    assert pp.NO_EVIDENCE_WARNING.severity == "note"
+
+
+def test_warning_import_used() -> None:
+    # Sanity: Warning is re-exported/usable from this module's imports.
+    assert Warning(message="x").severity == "note"

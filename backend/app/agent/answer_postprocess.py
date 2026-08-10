@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from app.agent.context_builder import BuiltContext, ContextElement
 from app.agent.schemas import VISUAL_ELEMENT_TYPES, Citation, TechnicalAnswer, Warning
 from app.core.observability import get_logger
+from app.retrieval.hybrid_search import MIN_RELEVANCE_SCORE
 
 logger = get_logger(__name__)
 
@@ -202,7 +203,12 @@ NO_EVIDENCE_WARNING = Warning(
 
 
 def enforce_never_invent_safety_net(
-    answer: TechnicalAnswer, *, tool_call_count: int, any_chunks_retrieved: bool
+    answer: TechnicalAnswer,
+    *,
+    tool_call_count: int,
+    any_chunks_retrieved: bool,
+    max_dense_relevance_score: float | None = None,
+    any_exact_evidence_found: bool = False,
 ) -> TechnicalAnswer:
     """A second, deterministic "never invent" gate independent of the system
     prompt (`app/agent/vrf_agent.py` STATIC_SYSTEM_PROMPT already instructs
@@ -210,43 +216,80 @@ def enforce_never_invent_safety_net(
     guarantee — see task instructions: "Implementasikan sebagai perilaku
     yang bisa dites, bukan sekadar kalimat di system prompt").
 
-    Deliberately narrow (to avoid false-positiving on legitimate
-    tool-free turns, e.g. a greeting): only forces `refused=True` when the
-    agent *did* call at least one retrieval tool this turn
-    (`tool_call_count > 0`, so it recognized the question needed evidence)
-    but genuinely found nothing (`any_chunks_retrieved is False`) and ended
-    up with zero citations, yet did not already mark itself refused. A
-    no-tool-call conversational turn (small talk, clarifying question) is
-    left untouched.
+    Never touches an already-`refused=True` answer, and never fires for a
+    no-tool-call conversational turn (`tool_call_count == 0` — small talk,
+    clarifying question) — both preserved unchanged from the original
+    (pre-§6.1) version of this gate.
 
-    **Known limitation, flagged for the next Q2.1 re-run (not fixed here)**:
-    `search_documents` (`app/retrieval/hybrid_search.py`) has no relevance
-    score threshold — Qdrant RRF fusion returns its top-`k` nearest chunks
-    for *any* query text against a non-empty collection, so once real
-    documents are indexed `any_chunks_retrieved` will normally be `True`
-    even for a completely out-of-domain question (e.g. QA's "capital of
-    France" repro), not just for a genuinely broken/empty index. F2-02's
-    citation validation (above) still removes any fabricated
-    `citations[]` entries in that case, but this specific gate will only
-    additionally force `refused=True` if `any_chunks_retrieved` was in
-    fact `False` for that turn (e.g. circuit breaker triggered, or a
-    `chunk_type` filter matched nothing) — it is not, by itself, a general
-    relevance filter. Loosening this condition to ignore
-    `any_chunks_retrieved` entirely was deliberately NOT done here: it
-    would also force `refused=True` for legitimate in-scope answers that
-    correctly used retrieved `table`/`paragraph`/`procedure` content
-    without needing an inline `{{el:ID}}` marker or an explicit citation
-    (see `test_safety_net_tool_called_and_chunks_retrieved_not_forced`,
-    which encodes that this is intentional, not an oversight) — trading a
-    confirmed BLOCKER (fabricated citations) for a new, broader
-    over-refusal failure mode is not a safe unilateral substitution.
-    Whether a genuine relevance-threshold signal is needed here is a
-    retrieval-quality/budget question for System Analyst, not an
-    implementation bug in this module — see this branch's STATUS REPORT.
+    Two independent ways to force `refused=True` (§6.1,
+    `Documentation/system-design/03-retrieval-chunking.md`):
+
+    1. **Original branch, unchanged**: `not any_chunks_retrieved and not
+       answer.citations` — the agent called a tool but genuinely got
+       nothing back at all (circuit breaker triggered, or a
+       `chunk_type`/`model_family` filter matched zero points). The
+       `not answer.citations` half is logically redundant in the real
+       pipeline (F2-02 always empties `citations` when
+       `context.elements_by_id` is empty, which is exactly what
+       `any_chunks_retrieved is False` implies) — kept anyway (System
+       Analyst §6.1.4 explicitly permits dropping it as "purely cosmetic",
+       but this module's existing direct-unit-test coverage constructs
+       `citations` independently of a real retrieval pipeline, so keeping
+       it preserves that test suite's existing, intentional behavior
+       unchanged rather than requiring it to be rewritten for a
+       code-generalization that doesn't need to touch this branch at all).
+    2. **§6.1, new**: `not any_exact_evidence_found AND
+       max_dense_relevance_score is not None AND
+       max_dense_relevance_score < MIN_RELEVANCE_SCORE` — the agent *did*
+       retrieve chunks (branch 1 doesn't apply), but every semantic search
+       this turn scored below the calibrated relevance floor (empirical
+       basis + residual limitations: `03-retrieval-chunking.md` §6.1.3).
+       **Deliberately NOT additionally gated on `not answer.citations`** —
+       unlike branch 1, `answer.citations` can be genuinely non-empty here
+       even when nothing is actually relevant: F2-02's whitelist only
+       proves an `element_id` was *retrieved* this turn, not that it is
+       *relevant* to the answer, so a citation built from a low-relevance
+       candidate pool can pass F2-02 validation while still being
+       fabricated in every way that matters to the user. This is the
+       precise mechanism that let the real F2-03 QA repro ("What is the
+       capital city of France...") slip through with 2 real-looking
+       citations even after F2-02 was fixed — the citations pointed at
+       elements that were genuinely retrieved (so F2-02 correctly kept
+       them) but were not remotely relevant to the question.
+       `any_exact_evidence_found` unconditionally exempts a turn from this
+       branch — an exact-match lookup (error code / page number / element
+       id the user or a prior turn already named explicitly) is either
+       correct or absent, never "topically similar but irrelevant", so it
+       has no need for a similarity threshold at all; without this
+       exemption a turn that correctly resolved an exact lookup but also
+       happened to make one low-scoring exploratory semantic call would be
+       wrongly refused.
+
+    `max_dense_relevance_score is None` (no semantic search tool was called
+    this turn at all — e.g. a turn that only used `tool_get_document_page`/
+    `tool_get_figure`) makes branch 2 inapplicable entirely, by design:
+    there is no relevance signal to threshold against, and branch 1 remains
+    the only applicable check in that case, exactly as before §6.1.
+
+    **Explicitly out of scope, by calibrated design** (`03-retrieval-chunking.md`
+    §6.1.3 round 2 / §6.1.5): domain-adjacent near-miss questions (e.g. "how
+    do I fix a window AC that isn't cooling" against a VRF/VRV commercial
+    manual corpus) score in the same range as genuine in-scope questions —
+    this gate does not and cannot separate those two classes; that is an
+    explicitly accepted residual risk pending a Fase 2 cross-encoder
+    reranker, not a bug in this implementation.
     """
     if answer.refused:
         return answer
-    if tool_call_count > 0 and not any_chunks_retrieved and not answer.citations:
+    if tool_call_count == 0:
+        return answer
+
+    force_refuse = (not any_chunks_retrieved and not answer.citations) or (
+        not any_exact_evidence_found
+        and max_dense_relevance_score is not None
+        and max_dense_relevance_score < MIN_RELEVANCE_SCORE
+    )
+    if force_refuse:
         return answer.model_copy(
             update={"refused": True, "warnings": [*answer.warnings, NO_EVIDENCE_WARNING]}
         )

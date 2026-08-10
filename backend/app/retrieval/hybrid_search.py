@@ -49,6 +49,17 @@ a `RetrievalResult` with an empty chunk list and
 pipeline (agent/chat service, C2.3/C2.4) proceeds best-effort with whatever
 TTFT budget is left, per the design's explicit "lanjutkan dengan
 best-effort ... alih-alih blocking" instruction.
+
+**§6.1 relevance-floor probe (2026-08-11, F2-03 "never invent" gap fix)**:
+after the main hybrid query succeeds, one additional dense-only Qdrant
+query (`_dense_relevance_probe`, `limit=1`, reuses the already-computed
+dense vector — no extra embedding cost) measures `top_dense_score`, a
+signal consumed ONLY by `enforce_never_invent_safety_net`
+(`app/agent/answer_postprocess.py`) to decide whether to force a refusal —
+it never changes which chunks are selected as context. See
+`MIN_RELEVANCE_SCORE`'s docstring and
+`Documentation/system-design/03-retrieval-chunking.md` §6.1 for the full
+empirical calibration and its explicitly-acknowledged limits.
 """
 
 from __future__ import annotations
@@ -76,6 +87,32 @@ DEFAULT_CIRCUIT_BREAKER_SECONDS = 8.0
 # `top_k` returned — a wider prefetch improves fusion quality (per-leg
 # recall) without changing the final result count.
 PREFETCH_MULTIPLIER = 4
+
+# §6.1 (`Documentation/system-design/03-retrieval-chunking.md`) — relevance
+# floor for the "never invent" safety net (`app/agent/answer_postprocess.py`
+# `enforce_never_invent_safety_net`), NOT used to filter/rank the chunks
+# returned to the LLM (RRF fusion above remains the sole source of truth for
+# *context*). Calibrated empirically 2026-08-11 against the live `vrf_chunks`
+# collection (document_id=4 fully ingested, 3,607 points, 1/6 source
+# documents — see §6.1.3 for the full methodology and numbers) using the
+# production embedding model (`BAAI/bge-small-en-v1.5`):
+#   - Clearly out-of-scope queries (the exact F2-03 QA repro class, e.g.
+#     "What is the capital city of France?"): top-1 dense cosine 0.4932-0.6609
+#   - Genuine in-scope queries: top-1 dense cosine 0.7697-0.8790
+#   - 0.68 sits in the gap between those two ranges (NOT a tightly-tuned
+#     threshold like THRESHOLD_TABLE/THRESHOLD_TEXT in
+#     `02-ingestion-pipeline.md` §3-4 — a starting point, still grounded in
+#     real data rather than a guess).
+# Explicitly does NOT separate domain-adjacent near-miss queries (e.g. "how
+# do I fix a window AC that isn't cooling") from genuine in-scope ones —
+# §6.1.3 round 2 found full score overlap (0.7153-0.7964 vs 0.7486-0.8377)
+# for that class; that is an accepted residual risk (see §6.1.5), not
+# something this constant is meant to solve. MUST be recalibrated if
+# `EMBEDDER_DENSE_MODEL` changes (cosine similarity distributions are
+# model-specific) or once the full 7-document corpus is ingested (this
+# snapshot is 1/6 documents) — see `calibrate_relevance.py`-equivalent
+# script embedded in §6.1.3 for the reusable calibration methodology.
+MIN_RELEVANCE_SCORE = 0.68
 
 
 class DenseEmbeddingModel(Protocol):
@@ -112,6 +149,13 @@ class RetrievalResult:
     chunks: list[RetrievedChunk] = field(default_factory=list)
     elapsed_ms: int = 0
     circuit_breaker_triggered: bool = False
+    # §6.1 relevance-floor signal — top-1 dense-only cosine similarity
+    # (`MIN_RELEVANCE_SCORE` docstring above), `None` if the dense-only
+    # probe itself failed/timed out (treated as "no relevance signal
+    # available", never as "definitely irrelevant" — see
+    # `_dense_relevance_probe`) or if the circuit breaker already
+    # short-circuited the whole call before reaching it.
+    top_dense_score: float | None = None
 
 
 def _build_effective_query(query: str, error_code: str | None, component: str | None) -> str:
@@ -146,6 +190,39 @@ def _fetch_chunks_by_ids(db: Session, chunk_ids: list[int]) -> dict[int, Chunk]:
         return {}
     rows = db.execute(select(Chunk).where(Chunk.id.in_(chunk_ids))).scalars().all()
     return {row.id: row for row in rows}
+
+
+def _dense_relevance_probe(
+    qdrant_client: QdrantClient,
+    collection: str,
+    dense_vector: list[float],
+    *,
+    timeout_seconds: float,
+) -> float | None:
+    """§6.1 relevance-floor signal — a second, dense-only query (no fusion,
+    `limit=1`, `with_payload=False`) reusing the already-computed
+    `dense_vector`, so this costs one extra local Qdrant round-trip and zero
+    extra embedding computation. Purely advisory: any failure here (timeout,
+    transport error, empty collection) returns `None` rather than raising —
+    this signal must never be able to break/degrade the main hybrid search
+    it rides alongside, and `None` is treated by the safety net
+    (`app/agent/answer_postprocess.py`) as "no signal available", never as
+    "definitely irrelevant"."""
+    try:
+        response = qdrant_client.query_points(
+            collection_name=collection,
+            query=dense_vector,
+            using=DENSE_VECTOR_NAME,
+            limit=1,
+            with_payload=False,
+            timeout=int(timeout_seconds),
+        )
+    except Exception:  # noqa: BLE001 — advisory-only signal, never fatal
+        logger.warning("retrieval.dense_relevance_probe_failed", extra={"collection": collection})
+        return None
+    if not response.points:
+        return None
+    return response.points[0].score
 
 
 def search_documents(
@@ -241,6 +318,25 @@ def search_documents(
 
     chunk_rows = _fetch_chunks_by_ids(db, ordered_ids)
 
+    # §6.1 relevance-floor probe — deliberately AFTER the main hybrid query
+    # has already succeeded (never adds latency to a call that was already
+    # going to be circuit-broken/fail) and BEFORE we compute the final
+    # `elapsed_ms`, so its cost is fully visible in that number (measured,
+    # not estimated — see `03-retrieval-chunking.md` §6.1.5).
+    dense_probe_start = time.monotonic()
+    top_dense_score = _dense_relevance_probe(
+        qdrant_client, collection, dense_vector, timeout_seconds=circuit_breaker_seconds
+    )
+    dense_probe_elapsed_ms = int((time.monotonic() - dense_probe_start) * 1000)
+    logger.info(
+        "retrieval.dense_relevance_probe",
+        extra={
+            "collection": collection,
+            "top_dense_score": top_dense_score,
+            "elapsed_ms": dense_probe_elapsed_ms,
+        },
+    )
+
     chunks: list[RetrievedChunk] = []
     for rank, chunk_id in enumerate(ordered_ids, start=1):
         row = chunk_rows.get(chunk_id)
@@ -274,4 +370,5 @@ def search_documents(
         chunks=chunks,
         elapsed_ms=elapsed_ms,
         circuit_breaker_triggered=False,
+        top_dense_score=top_dense_score,
     )

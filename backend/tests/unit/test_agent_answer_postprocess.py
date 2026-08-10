@@ -303,6 +303,126 @@ def test_safety_net_tool_called_no_chunks_but_has_citations_not_forced() -> None
     assert result.refused is False
 
 
+# ---------------------------------------------------------------------------
+# enforce_never_invent_safety_net — §6.1 relevance floor
+# (Documentation/system-design/03-retrieval-chunking.md §6.1.4 test matrix)
+# ---------------------------------------------------------------------------
+
+
+def test_safety_net_below_threshold_forces_refuse_even_with_whitelisted_citation() -> None:
+    """(a) — the real F2-03 case, not the empty-context version: a citation
+    that legitimately passed F2-02's whitelist (its element_id really was
+    retrieved this turn) must STILL be forced to `refused=True` if every
+    semantic search this turn scored below MIN_RELEVANCE_SCORE — F2-02
+    proves "retrieved", not "relevant"."""
+    citation = Citation(document_id="3", page=282, element_id="7814", element_type="figure")
+    answer = TechnicalAnswer(
+        answer="The capital city of France is Paris.",
+        confidence=1.0,
+        citations=[citation],
+    )
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=1,
+        any_chunks_retrieved=True,
+        max_dense_relevance_score=0.6609,  # exact round-1 out-of-scope ceiling, §6.1.3
+        any_exact_evidence_found=False,
+    )
+
+    assert result.refused is True
+    assert any(w.message == pp.NO_EVIDENCE_WARNING.message for w in result.warnings)
+
+
+def test_safety_net_above_threshold_not_forced() -> None:
+    """(b) regression guard — a genuinely relevant turn must never be forced
+    to refuse, including right at the calibrated in-scope floor (0.7486,
+    §6.1.3 round 2 "in_scope_awkward" minimum)."""
+    citation = Citation(document_id="3", page=238, element_id="42", element_type="icon")
+    answer = TechnicalAnswer(
+        answer="Grounded answer.", confidence=0.9, citations=[citation]
+    )
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=1,
+        any_chunks_retrieved=True,
+        max_dense_relevance_score=0.7486,
+        any_exact_evidence_found=False,
+    )
+
+    assert result.refused is False
+
+
+def test_safety_net_exactly_at_threshold_not_forced() -> None:
+    """Boundary check — the gate is `< MIN_RELEVANCE_SCORE`, so a score
+    exactly equal to the threshold must NOT be forced (only strictly below)."""
+    answer = TechnicalAnswer(answer="Grounded answer.", confidence=0.9)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=1,
+        any_chunks_retrieved=True,
+        max_dense_relevance_score=pp.MIN_RELEVANCE_SCORE,
+        any_exact_evidence_found=False,
+    )
+
+    assert result.refused is False
+
+
+def test_safety_net_below_threshold_but_exact_evidence_found_not_forced() -> None:
+    """(c) regression guard — `any_exact_evidence_found=True` unconditionally
+    exempts the turn from the relevance floor, even if a separate low-scoring
+    exploratory semantic call also happened this turn."""
+    citation = Citation(document_id="3", page=60, element_id="13", element_type="table")
+    answer = TechnicalAnswer(
+        answer="Error code P8 means transmission failure.",
+        confidence=0.9,
+        citations=[citation],
+    )
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=1,
+        any_chunks_retrieved=True,
+        max_dense_relevance_score=0.4932,  # well below threshold
+        any_exact_evidence_found=True,
+    )
+
+    assert result.refused is False
+
+
+def test_safety_net_no_semantic_search_this_turn_relevance_branch_inapplicable() -> None:
+    """`max_dense_relevance_score is None` (no semantic-search tool called
+    this turn, e.g. only `tool_get_document_page`) must never trigger the
+    relevance-floor branch — there is no signal to threshold against."""
+    answer = TechnicalAnswer(answer="Here is page 60.", confidence=0.9)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=1,
+        any_chunks_retrieved=True,
+        max_dense_relevance_score=None,
+        any_exact_evidence_found=False,
+    )
+
+    assert result.refused is False
+
+
+def test_safety_net_defaults_preserve_pre_6_1_behavior() -> None:
+    """Sanity: omitting the two new §6.1 kwargs entirely (as every call site
+    predating this change does) must behave identically to before — this is
+    exactly what F2-03's original (pre-§6.1) fix relied on."""
+    citation = Citation(document_id="3", page=282, element_id="99", element_type="section")
+    answer = TechnicalAnswer(answer="Some answer.", confidence=0.9, citations=[citation])
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=1, any_chunks_retrieved=True
+    )
+
+    assert result.refused is False
+
+
 def test_no_evidence_warning_severity_is_note() -> None:
     assert pp.NO_EVIDENCE_WARNING.severity == "note"
 

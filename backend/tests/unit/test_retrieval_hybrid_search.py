@@ -66,13 +66,35 @@ class FakeSparseModel:
 
 
 class FakeQdrantClient:
+    """§6.1: `search_documents` now issues TWO `query_points` calls per
+    invocation — the main hybrid (RRF fusion, has a `prefetch` kwarg) query,
+    then the dense-only relevance probe (no `prefetch` kwarg). `self.calls`
+    records both, in order; `self.response`/`self.raise_error` are only
+    consulted for the main query, `self.probe_response`/`self.probe_raise_error`
+    only for the probe (defaulting to `self.response` if unset, so existing
+    tests that never touch the probe-specific attributes keep working
+    unchanged)."""
+
     def __init__(self) -> None:
-        self.last_kwargs: dict[str, Any] | None = None
+        self.calls: list[dict[str, Any]] = []
         self.response: Any = SimpleNamespace(points=[])
         self.raise_error: Exception | None = None
+        self.probe_response: Any | None = None
+        self.probe_raise_error: Exception | None = None
+
+    @property
+    def last_kwargs(self) -> dict[str, Any] | None:
+        """Kwargs of the main hybrid query specifically (the first call) —
+        existing tests inspect this to assert on `prefetch`/`query_filter`,
+        which only the main query has."""
+        return self.calls[0] if self.calls else None
 
     def query_points(self, **kwargs: Any) -> Any:
-        self.last_kwargs = kwargs
+        self.calls.append(kwargs)
+        if "prefetch" not in kwargs:
+            if self.probe_raise_error is not None:
+                raise self.probe_raise_error
+            return self.probe_response if self.probe_response is not None else self.response
         if self.raise_error is not None:
             raise self.raise_error
         return self.response
@@ -307,3 +329,115 @@ def test_search_documents_default_effective_query_equals_query_when_no_extras() 
 
     assert result.query == "hello"
     assert result.effective_query == "hello"
+
+
+# ---------------------------------------------------------------------------
+# search_documents — §6.1 dense-only relevance probe (top_dense_score)
+# ---------------------------------------------------------------------------
+
+
+def test_search_documents_returns_top_dense_score_from_probe() -> None:
+    db = _make_session()
+    client = FakeQdrantClient()
+    client.probe_response = SimpleNamespace(points=[SimpleNamespace(score=0.8251)])
+
+    result = hs.search_documents(
+        db, client, FakeDenseModel(), FakeSparseModel(), query="P8 error", collection="vrf_chunks"
+    )
+
+    assert result.top_dense_score == 0.8251
+
+
+def test_search_documents_probe_call_has_no_prefetch_no_fusion_limit_one() -> None:
+    db = _make_session()
+    client = FakeQdrantClient()
+    client.probe_response = SimpleNamespace(points=[SimpleNamespace(score=0.9)])
+
+    hs.search_documents(
+        db, client, FakeDenseModel(), FakeSparseModel(), query="P8 error", collection="vrf_chunks"
+    )
+
+    assert len(client.calls) == 2
+    probe_kwargs = client.calls[1]
+    assert "prefetch" not in probe_kwargs
+    assert probe_kwargs["using"] == hs.DENSE_VECTOR_NAME
+    assert probe_kwargs["limit"] == 1
+    assert probe_kwargs["with_payload"] is False
+
+
+def test_search_documents_probe_reuses_already_computed_dense_vector() -> None:
+    """No extra embedding computation for the probe — `dense_model.embed`
+    is called exactly once per `search_documents` call, same as before §6.1."""
+    db = _make_session()
+    client = FakeQdrantClient()
+    dense = FakeDenseModel()
+
+    hs.search_documents(
+        db, client, dense, FakeSparseModel(), query="P8 error", collection="vrf_chunks"
+    )
+
+    assert dense.calls == [["P8 error"]]
+
+
+def test_search_documents_top_dense_score_none_when_probe_returns_no_points() -> None:
+    db = _make_session()
+    client = FakeQdrantClient()
+    client.probe_response = SimpleNamespace(points=[])
+
+    result = hs.search_documents(
+        db, client, FakeDenseModel(), FakeSparseModel(), query="x", collection="vrf_chunks"
+    )
+
+    assert result.top_dense_score is None
+
+
+def test_search_documents_top_dense_score_none_when_probe_raises() -> None:
+    """The probe is advisory-only — a failure there must never fail/degrade
+    the main hybrid search result."""
+    db = _make_session()
+    client = FakeQdrantClient()
+    client.response = SimpleNamespace(points=[])
+    client.probe_raise_error = TimeoutError("probe timed out")
+
+    result = hs.search_documents(
+        db, client, FakeDenseModel(), FakeSparseModel(), query="x", collection="vrf_chunks"
+    )
+
+    assert result.top_dense_score is None
+    assert result.circuit_breaker_triggered is False
+
+
+def test_search_documents_probe_not_called_when_main_query_circuit_breaks() -> None:
+    db = _make_session()
+    client = FakeQdrantClient()
+    client.raise_error = TimeoutError("qdrant took too long")
+
+    hs.search_documents(
+        db, client, FakeDenseModel(), FakeSparseModel(), query="x", collection="vrf_chunks"
+    )
+
+    # Only the (failing) main query is attempted — no point paying for a
+    # second round-trip once the circuit breaker has already triggered.
+    assert len(client.calls) == 1
+
+
+def test_dense_relevance_probe_returns_none_on_exception() -> None:
+    class RaisingClient:
+        def query_points(self, **kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+    score = hs._dense_relevance_probe(
+        RaisingClient(), "vrf_chunks", [0.1, 0.2], timeout_seconds=8.0
+    )
+    assert score is None
+
+
+def test_dense_relevance_probe_returns_score() -> None:
+    class ScoringClient:
+        def query_points(self, **kwargs: Any) -> Any:
+            return SimpleNamespace(points=[SimpleNamespace(score=0.75)])
+
+    score = hs._dense_relevance_probe(
+        ScoringClient(), "vrf_chunks", [0.1, 0.2], timeout_seconds=8.0
+    )
+    assert score == 0.75

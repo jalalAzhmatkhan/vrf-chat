@@ -214,6 +214,84 @@ def test_tool_search_documents_folds_error_code_into_query(monkeypatch: pytest.M
 
 
 # ---------------------------------------------------------------------------
+# §6.1 relevance-floor signals — _merge_dense_relevance / max_dense_relevance_score
+# ---------------------------------------------------------------------------
+
+
+def test_merge_dense_relevance_sets_initial_value() -> None:
+    deps = _deps(_make_session())
+    result = RetrievalResult(query="q", effective_query="q", top_dense_score=0.75)
+
+    t._merge_dense_relevance(deps, result)
+
+    assert deps.max_dense_relevance_score == 0.75
+
+
+def test_merge_dense_relevance_none_does_not_overwrite_existing() -> None:
+    deps = _deps(_make_session())
+    deps.max_dense_relevance_score = 0.8
+    result = RetrievalResult(query="q", effective_query="q", top_dense_score=None)
+
+    t._merge_dense_relevance(deps, result)
+
+    assert deps.max_dense_relevance_score == 0.8
+
+
+def test_merge_dense_relevance_keeps_running_max_higher_wins() -> None:
+    deps = _deps(_make_session())
+    deps.max_dense_relevance_score = 0.6
+    result = RetrievalResult(query="q", effective_query="q", top_dense_score=0.85)
+
+    t._merge_dense_relevance(deps, result)
+
+    assert deps.max_dense_relevance_score == 0.85
+
+
+def test_merge_dense_relevance_keeps_running_max_lower_does_not_replace() -> None:
+    deps = _deps(_make_session())
+    deps.max_dense_relevance_score = 0.85
+    result = RetrievalResult(query="q", effective_query="q", top_dense_score=0.6)
+
+    t._merge_dense_relevance(deps, result)
+
+    assert deps.max_dense_relevance_score == 0.85
+
+
+def test_tool_search_documents_merges_top_dense_score_into_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _make_session()
+    fake = FakeSearchDocuments(
+        [RetrievalResult(query="q", effective_query="q", chunks=[], top_dense_score=0.72)]
+    )
+    monkeypatch.setattr(t, "search_documents", fake)
+
+    deps = _deps(db)
+    t.tool_search_documents(deps, "question")
+
+    assert deps.max_dense_relevance_score == 0.72
+
+
+def test_tool_search_documents_running_max_across_multiple_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _make_session()
+    fake = FakeSearchDocuments(
+        [
+            RetrievalResult(query="a", effective_query="a", chunks=[], top_dense_score=0.5),
+            RetrievalResult(query="b", effective_query="b", chunks=[], top_dense_score=0.9),
+        ]
+    )
+    monkeypatch.setattr(t, "search_documents", fake)
+
+    deps = _deps(db)
+    t.tool_search_documents(deps, "first question")
+    t.tool_search_documents(deps, "second question")
+
+    assert deps.max_dense_relevance_score == 0.9
+
+
+# ---------------------------------------------------------------------------
 # tool_search_error_code / _exact_error_code_lookup
 # ---------------------------------------------------------------------------
 
@@ -222,6 +300,7 @@ def test_exact_error_code_lookup_no_rows_returns_empty_string() -> None:
     db = _make_session()
     deps = _deps(db)
     assert t._exact_error_code_lookup(deps, "P8", None) == ""
+    assert deps.any_exact_evidence_found is False  # §6.1 — nothing found, not exempted
 
 
 def test_exact_error_code_lookup_found_with_element(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,6 +321,7 @@ def test_exact_error_code_lookup_found_with_element(monkeypatch: pytest.MonkeyPa
     assert t.build_marker(element.id) not in result  # non-visual element type -> no marker
     assert deps.any_chunks_retrieved is True
     assert element.id in deps.context_elements
+    assert deps.any_exact_evidence_found is True  # §6.1 — exempt from relevance floor
 
 
 def test_exact_error_code_lookup_visual_element_gets_marker() -> None:
@@ -413,14 +493,18 @@ def test_tool_find_troubleshooting_procedure_found(monkeypatch: pytest.MonkeyPat
     document, page = _seed_document_and_page(db)
     element = _make_element(db, page, document, text="Step 1: check compressor.")
     chunk = _chunk(1, document_id=document.id, element_ids=[element.id], chunk_type="procedure")
-    fake = FakeSearchDocuments([RetrievalResult(query="q", effective_query="q", chunks=[chunk])])
+    fake = FakeSearchDocuments(
+        [RetrievalResult(query="q", effective_query="q", chunks=[chunk], top_dense_score=0.81)]
+    )
     monkeypatch.setattr(t, "search_documents", fake)
 
-    output = t.tool_find_troubleshooting_procedure(_deps(db), "outdoor unit mati")
+    deps = _deps(db)
+    output = t.tool_find_troubleshooting_procedure(deps, "outdoor unit mati")
 
     assert "Step 1" in output
     assert fake.calls[0]["chunk_type"] == "procedure"
     assert len(fake.calls) == 1  # no fallback needed
+    assert deps.max_dense_relevance_score == 0.81  # §6.1
 
 
 def test_tool_find_troubleshooting_procedure_falls_back_to_general_search(
@@ -469,14 +553,18 @@ def test_tool_find_wiring_diagram_happy_path(monkeypatch: pytest.MonkeyPatch) ->
     document, page = _seed_document_and_page(db)
     element = _make_element(db, page, document, element_type="figure", text="Wiring schematic.")
     chunk = _chunk(1, document_id=document.id, element_ids=[element.id], chunk_type="figure")
-    fake = FakeSearchDocuments([RetrievalResult(query="q", effective_query="q", chunks=[chunk])])
+    fake = FakeSearchDocuments(
+        [RetrievalResult(query="q", effective_query="q", chunks=[chunk], top_dense_score=0.79)]
+    )
     monkeypatch.setattr(t, "search_documents", fake)
 
-    output = t.tool_find_wiring_diagram(_deps(db), "compressor")
+    deps = _deps(db)
+    output = t.tool_find_wiring_diagram(deps, "compressor")
 
     assert "Wiring schematic." in output
     assert fake.calls[0]["chunk_type"] == "figure"
     assert fake.calls[0]["component"] == "compressor"
+    assert deps.max_dense_relevance_score == 0.79  # §6.1
 
 
 def test_tool_find_wiring_diagram_no_results(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -522,6 +610,7 @@ def test_tool_get_document_page_found_with_icon() -> None:
     assert deps.any_chunks_retrieved is True
     assert para.id in deps.context_elements
     assert icon.id in deps.context_elements
+    assert deps.any_exact_evidence_found is True  # §6.1 — explicit page reference, exempt
 
 
 def test_tool_get_document_page_skips_element_missing_from_fetch_result(
@@ -580,6 +669,7 @@ def test_tool_get_figure_found_with_text() -> None:
     assert t.build_marker(element.id) in output
     assert "A wiring diagram." in output
     assert deps.any_chunks_retrieved is True
+    assert deps.any_exact_evidence_found is True  # §6.1 — explicit element id reference, exempt
 
 
 def test_tool_get_figure_uses_visual_description_when_no_text() -> None:

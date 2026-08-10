@@ -21,6 +21,15 @@ Each tool:
    running whitelist `app/agent/answer_postprocess.py` validates the final
    answer's markers against (every tool call in a turn contributes, not
    just the last one).
+5. **[§6.1, 2026-08-11]** Every semantic-search-based tool (everything built
+   on `search_documents`) folds `RetrievalResult.top_dense_score` into
+   `AgentDeps.max_dense_relevance_score` (running max across the whole
+   turn); every exact-match/identifier-lookup tool
+   (`_exact_error_code_lookup`, `tool_get_document_page`, `tool_get_figure`)
+   sets `AgentDeps.any_exact_evidence_found = True` when it finds a real
+   element. Both feed `enforce_never_invent_safety_net`'s relevance-floor
+   gate (`Documentation/system-design/03-retrieval-chunking.md` §6.1) —
+   never used to filter/rank what's sent to the LLM as context.
 
 These are plain functions (not decorated with `@agent.tool`) so they are
 independently unit-testable without constructing a Pydantic AI `Agent` at
@@ -50,6 +59,7 @@ from app.db.models.error_codes import ErrorCode
 from app.domain.query_expansion import KnownEntities, expand_query
 from app.retrieval.hybrid_search import (
     DenseEmbeddingModel,
+    RetrievalResult,
     SparseEmbeddingModel,
     search_documents,
 )
@@ -93,12 +103,28 @@ class AgentDeps:
     context_elements: dict[int, ContextElement] = field(default_factory=dict)
     tool_call_count: int = 0
     any_chunks_retrieved: bool = False
+    # §6.1 relevance-floor signals (module docstring point 5) — consumed by
+    # `enforce_never_invent_safety_net`, never by context building.
+    max_dense_relevance_score: float | None = None
+    any_exact_evidence_found: bool = False
 
 
 def _merge_context(deps: AgentDeps, context: BuiltContext) -> None:
     deps.context_elements.update(context.elements_by_id)
     if context.chunks:
         deps.any_chunks_retrieved = True
+
+
+def _merge_dense_relevance(deps: AgentDeps, result: RetrievalResult) -> None:
+    """§6.1 — running max of `top_dense_score` across every semantic-search
+    tool call this turn. `None` (probe failed/unavailable) never overwrites
+    a real prior value, and never counts as "0" — it just leaves the
+    running max as-is."""
+    if result.top_dense_score is None:
+        return
+    current = deps.max_dense_relevance_score
+    if current is None or result.top_dense_score > current:
+        deps.max_dense_relevance_score = result.top_dense_score
 
 
 def _render_context_or_message(context: BuiltContext, *, circuit_breaker_triggered: bool) -> str:
@@ -141,6 +167,7 @@ def tool_search_documents(
         max_chunk_chars=deps.max_chunk_chars,
     )
     _merge_context(deps, context)
+    _merge_dense_relevance(deps, result)
     return _render_context_or_message(
         context, circuit_breaker_triggered=result.circuit_breaker_triggered
     )
@@ -165,6 +192,7 @@ def _exact_error_code_lookup(deps: AgentDeps, error_code: str, model_family: str
     deps.context_elements.update(elements_by_id)
     if elements_by_id:
         deps.any_chunks_retrieved = True
+        deps.any_exact_evidence_found = True  # §6.1 — exact-match, exempt from relevance floor
 
     parts = []
     for row in rows:
@@ -240,6 +268,7 @@ def tool_find_troubleshooting_procedure(
         max_chunk_chars=deps.max_chunk_chars,
     )
     _merge_context(deps, context)
+    _merge_dense_relevance(deps, procedure_result)
     if context.chunks:
         return context.context_text
     if procedure_result.circuit_breaker_triggered:
@@ -274,6 +303,7 @@ def tool_find_wiring_diagram(
         max_chunk_chars=deps.max_chunk_chars,
     )
     _merge_context(deps, context)
+    _merge_dense_relevance(deps, result)
     return _render_context_or_message(
         context, circuit_breaker_triggered=result.circuit_breaker_triggered
     )
@@ -301,6 +331,7 @@ def tool_get_document_page(deps: AgentDeps, document_id: int, page_number: int) 
     if not elements_by_id:
         return NOT_FOUND_PAGE_MESSAGE
     deps.any_chunks_retrieved = True
+    deps.any_exact_evidence_found = True  # §6.1 — explicit page reference, exempt
 
     parts: list[str] = []
     for element_id in element_ids:
@@ -326,6 +357,7 @@ def tool_get_figure(deps: AgentDeps, figure_id: int) -> str:
 
     deps.context_elements.update(elements_by_id)
     deps.any_chunks_retrieved = True
+    deps.any_exact_evidence_found = True  # §6.1 — explicit element id reference, exempt
     marker = build_marker(figure_id)
     visual_description = element.visual_description or {}
     visual_description_text = visual_description.get("description")

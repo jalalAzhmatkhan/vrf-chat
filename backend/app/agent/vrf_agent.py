@@ -255,4 +255,6 @@ async def run_agent_turn(
         post_result.answer,
         tool_call_count=deps.tool_call_count,
         any_chunks_retrieved=deps.any_chunks_retrieved,
+        max_dense_relevance_score=deps.max_dense_relevance_score,  # §6.1
+        any_exact_evidence_found=deps.any_exact_evidence_found,  # §6.1
     )

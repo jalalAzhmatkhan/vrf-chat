@@ -517,6 +517,9 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
 
     element = db.execute(select(Element)).scalar_one()
     assert element.id != 7  # sanity: local_id and real db id genuinely differ here
+    # [KG-W1.2] KGCandidateEntity/KGCandidateRelation gained extraction_method
+    # /canonical_name/model_family/justification_span (K1) — the fixtures
+    # above don't set them, so they serialize at their defaults.
     assert element.kg_candidate_entities == [
         {
             "name": "TH3",
@@ -525,6 +528,10 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "source_document": "manual.pdf",
             "page": 1,
             "element_id": element.id,
+            "extraction_method": "",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": None,
         }
     ]
     assert element.kg_candidate_relations == [
@@ -536,6 +543,10 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "source_document": "manual.pdf",
             "page": 1,
             "element_id": element.id,
+            "extraction_method": "",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": None,
         }
     ]
 

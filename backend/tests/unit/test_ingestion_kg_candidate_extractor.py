@@ -81,11 +81,19 @@ def test_extract_from_visual_description_components_and_connections() -> None:
     assert result.entities[0].source_document == "doc.pdf"
     assert result.entities[0].page == 3
     assert result.entities[0].element_id == 5
+    # [KG-W1.2, K1] VLM-structured entities: extraction_method fixed,
+    # canonical_name/model_family not yet populated by this module,
+    # justification_span not computable (no offset into `components[]`).
+    assert result.entities[0].extraction_method == kg.EXTRACTION_METHOD_VLM_COMPONENT
+    assert result.entities[0].canonical_name is None
+    assert result.entities[0].model_family is None
+    assert result.entities[0].justification_span is None
 
     assert len(result.relations) == 2
     assert result.relations[0].subject == "compressor"
     assert result.relations[0].predicate == kg.RELATION_CONNECTED_TO
     assert result.relations[0].object == "TH3"
+    assert result.relations[0].extraction_method == kg.EXTRACTION_METHOD_VLM_CONNECTION
     assert result.relations[1].subject == "TH3"
     assert result.relations[1].object == "PCB"
 
@@ -176,6 +184,66 @@ def test_extract_from_text_component_keyword() -> None:
     entity = next(e for e in result.entities if e.name == "compressor")
     assert entity.entity_type == "Component"
     assert entity.confidence == kg.CONFIDENCE_TEXT_KEYWORD
+    # [KG-W1.2, K1]
+    assert entity.extraction_method == kg.EXTRACTION_METHOD_DICT_KEYWORD
+    assert entity.canonical_name is None
+    assert entity.model_family is None
+    text = element.text
+    assert text is not None
+    assert entity.justification_span is not None
+    start, end = entity.justification_span
+    assert text[start:end].lower() == "compressor"
+
+
+def test_extract_from_text_sensor_id_justification_span() -> None:
+    """[KG-W1.2, K1] `justification_span` is the exact `[start, end]`
+    character offset of the match within `element.text`."""
+    element = _element(text="Measure the resistance of TH3 connected via CN105.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor = next(e for e in result.entities if e.entity_type == "Sensor")
+    assert sensor.extraction_method == kg.EXTRACTION_METHOD_REGEX_SENSOR_ID
+    text = element.text
+    assert text is not None
+    assert sensor.justification_span is not None
+    start, end = sensor.justification_span
+    assert text[start:end] == "TH3"
+
+    connector = next(e for e in result.entities if e.entity_type == "Connector")
+    assert connector.extraction_method == kg.EXTRACTION_METHOD_REGEX_CONNECTOR_ID
+    assert connector.justification_span is not None
+    start, end = connector.justification_span
+    assert text[start:end] == "CN105"
+
+
+def test_extract_from_text_error_code_extraction_method() -> None:
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE
+    assert error_code.justification_span is not None
+
+
+def test_extract_from_visual_description_description_entities_use_vlm_suffix_and_no_span() -> None:
+    """[KG-W1.2, K1] Entities extracted from `visual_description.description`
+    (not `element.text`) get an `extraction_method` suffix distinguishing the
+    source, and `justification_span=None` per the K1 contract ("null untuk
+    sumber VLM")."""
+    element = _element(local_id=9, element_type="figure", page_number=5)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=5, element_local_id=9, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Check the compressor and TH3.", components=[], connections=[]
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "compressor" in names
+    assert "TH3" in names
+    for entity in result.entities:
+        assert entity.extraction_method.endswith("_vlm_description")
+        assert entity.justification_span is None
 
 
 def test_extract_from_text_sensor_and_connector_ids() -> None:
@@ -390,6 +458,8 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
         source_document="doc.pdf",
         page=1,
         element_id=1,
+        extraction_method="dict_keyword",
+        justification_span=[6, 16],
     )
     relation = kg.KGCandidateRelation(
         subject="compressor",
@@ -399,6 +469,7 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
         source_document="doc.pdf",
         page=1,
         element_id=1,
+        extraction_method="vlm_connection",
     )
 
     entity_dicts = kg.entities_to_jsonb([entity])
@@ -412,6 +483,10 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "source_document": "doc.pdf",
             "page": 1,
             "element_id": 1,
+            "extraction_method": "dict_keyword",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": [6, 16],
         }
     ]
     assert relation_dicts == [
@@ -423,5 +498,9 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "source_document": "doc.pdf",
             "page": 1,
             "element_id": 1,
+            "extraction_method": "vlm_connection",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": None,
         }
     ]

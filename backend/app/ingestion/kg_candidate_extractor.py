@@ -107,6 +107,37 @@ combining evidence is cross-source agreement on the exact SAME evidence
 deleting/merging records. If a future change ever needs relation
 deduplication for a different reason, that is a new design decision
 requiring System Analyst sign-off, not something to add unilaterally here.
+
+**[KG-W1.3, 2026-08-10 — K2 canonical key: `model_family` wiring]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §5.1/§6.1 K2.
+The design decision is a composite canonical key
+`(model_family, entity_type, canonical_identifier)` rather than a bare
+identifier — the SAME raw identifier (e.g. `TH3`) is **not** assumed to
+refer to the same physical sensor across different vendors/model series
+(this corpus spans 7 manuals, 2 vendors, multiple VRV/VRF series). This
+module does not itself resolve or apply the key (that is a Fase 3/Neo4j
+concern, or `KG-W2.1`'s alias table for `canonical_name`) — its job is only
+to make `model_family` available on every candidate so the key CAN be
+formed downstream. `extract_kg_candidates`/`extract_from_text`/
+`extract_from_visual_description` all gain an optional `model_family`
+keyword parameter (default `None`, preserving every existing call site),
+threaded straight onto every `KGCandidateEntity.model_family`/
+`KGCandidateRelation.model_family` this module constructs — unconditionally
+(this extractor never produces the document-structural entity types
+`Product`/`Model`/`ServiceManual`/`Figure`/`Page` that §5.1 exempts from the
+`model_family` key, so no conditional logic is needed here).
+
+**Wiring gap, intentionally left open per Wave 1 scope boundaries**: the
+live `app/ingestion/orchestrator.py` Stage `kg_candidate` call site does
+**not** pass `model_family` yet (it would need
+`document.model_family` threaded through, a one-line change) — `orchestrator
+.py`/Stage 1-4 are explicitly out of scope for Wave 1 ("Jangan ubah
+orchestrator.py atau Stage 1-4"). The Wave 1 DoD's re-extractor module
+(reads `elements`/`documents.model_family` straight from Postgres,
+independent of `orchestrator.py`) is the intended near-term caller that
+DOES pass `model_family` — see that module for where the join actually
+happens. Reported to System Analyst/coordinator as a follow-up so
+`orchestrator.py`'s one-line gap isn't forgotten (see STATUS REPORT).
 """
 
 from __future__ import annotations
@@ -284,6 +315,7 @@ def _extract_entities_from_text(
     page_number: int,
     element_id: int,
     is_vlm_description: bool = False,
+    model_family: str | None = None,
 ) -> list[KGCandidateEntity]:
     """Deterministic component/sensor/connector/error-code entity matchers,
     shared by `extract_from_text` (`element.text`) and
@@ -321,6 +353,7 @@ def _extract_entities_from_text(
                 element_id=element_id,
                 extraction_method=EXTRACTION_METHOD_DICT_KEYWORD + method_suffix,
                 justification_span=_justification_span(kw_match, compute=compute_span),
+                model_family=model_family,
             )
         )
 
@@ -335,6 +368,7 @@ def _extract_entities_from_text(
                 element_id=element_id,
                 extraction_method=EXTRACTION_METHOD_REGEX_SENSOR_ID + method_suffix,
                 justification_span=_justification_span(match, compute=compute_span),
+                model_family=model_family,
             )
         )
 
@@ -349,6 +383,7 @@ def _extract_entities_from_text(
                 element_id=element_id,
                 extraction_method=EXTRACTION_METHOD_REGEX_CONNECTOR_ID + method_suffix,
                 justification_span=_justification_span(match, compute=compute_span),
+                model_family=model_family,
             )
         )
 
@@ -375,6 +410,7 @@ def _extract_entities_from_text(
                     element_id=element_id,
                     extraction_method=EXTRACTION_METHOD_REGEX_ERROR_CODE + method_suffix,
                     justification_span=_justification_span(match, compute=compute_span),
+                    model_family=model_family,
                 )
             )
 
@@ -382,7 +418,11 @@ def _extract_entities_from_text(
 
 
 def extract_from_visual_description(
-    element: ElementDraft, cascade_result: CascadeResult, document_ref: str
+    element: ElementDraft,
+    cascade_result: CascadeResult,
+    document_ref: str,
+    *,
+    model_family: str | None = None,
 ) -> ElementKGCandidates:
     result = ElementKGCandidates()
     vd = cascade_result.visual_description
@@ -399,6 +439,7 @@ def extract_from_visual_description(
                 page=element.page_number,
                 element_id=element.local_id,
                 extraction_method=EXTRACTION_METHOD_VLM_COMPONENT,
+                model_family=model_family,
             )
         )
 
@@ -417,6 +458,7 @@ def extract_from_visual_description(
                 page=element.page_number,
                 element_id=element.local_id,
                 extraction_method=EXTRACTION_METHOD_VLM_CONNECTION,
+                model_family=model_family,
             )
         )
 
@@ -435,13 +477,16 @@ def extract_from_visual_description(
                 page_number=element.page_number,
                 element_id=element.local_id,
                 is_vlm_description=True,
+                model_family=model_family,
             )
         )
 
     return result
 
 
-def extract_from_text(element: ElementDraft, document_ref: str) -> ElementKGCandidates:
+def extract_from_text(
+    element: ElementDraft, document_ref: str, *, model_family: str | None = None
+) -> ElementKGCandidates:
     result = ElementKGCandidates()
     if not element.text:
         return result
@@ -454,6 +499,7 @@ def extract_from_text(element: ElementDraft, document_ref: str) -> ElementKGCand
             document_ref=document_ref,
             page_number=element.page_number,
             element_id=element.local_id,
+            model_family=model_family,
         )
     )
     return result
@@ -463,10 +509,20 @@ def extract_kg_candidates(
     parse_result: DoclingParseResult,
     document_ref: str,
     cascade_results: list[CascadeResult] | None = None,
+    *,
+    model_family: str | None = None,
 ) -> dict[int, ElementKGCandidates]:
     """Extract candidates for every element in `parse_result`, keyed by
     `ElementDraft.local_id`. Elements with no candidates found are omitted
-    from the returned dict (not present with empty lists)."""
+    from the returned dict (not present with empty lists).
+
+    `model_family` (**[KG-W1.3, K2]**, optional, default `None`) is
+    `documents.model_family` for the document being processed — threaded
+    onto every produced candidate's `KGCandidateEntity.model_family`/
+    `KGCandidateRelation.model_family` unchanged, forming (together with
+    `entity_type` and the eventual `canonical_name`) the composite canonical
+    key decided in `09-kg-extraction-strategy.md` §5.1. See module docstring
+    for which caller is expected to actually pass this today."""
     cascade_by_local_id = {
         r.task.element_local_id: r
         for r in (cascade_results or [])
@@ -479,11 +535,13 @@ def extract_kg_candidates(
 
         cascade_result = cascade_by_local_id.get(element.local_id)
         if cascade_result is not None:
-            vlm_candidates = extract_from_visual_description(element, cascade_result, document_ref)
+            vlm_candidates = extract_from_visual_description(
+                element, cascade_result, document_ref, model_family=model_family
+            )
             candidates.entities.extend(vlm_candidates.entities)
             candidates.relations.extend(vlm_candidates.relations)
 
-        text_candidates = extract_from_text(element, document_ref)
+        text_candidates = extract_from_text(element, document_ref, model_family=model_family)
         candidates.entities.extend(text_candidates.entities)
         candidates.relations.extend(text_candidates.relations)
 

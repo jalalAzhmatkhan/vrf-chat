@@ -415,6 +415,57 @@ def test_extract_kg_candidates_merges_text_and_vlm_sources() -> None:
     assert "compressor" in text_names
 
 
+def test_extract_kg_candidates_default_model_family_is_none() -> None:
+    """[KG-W1.3, K2] Without an explicit `model_family` argument (the
+    orchestrator.py call site today, see module docstring wiring-gap note),
+    every candidate's `model_family` stays `None` — same as before this
+    change, no silent behavior shift for existing callers."""
+    element = _element(local_id=1, text="Check TH3 near the compressor.")
+    parse_result = DoclingParseResult(
+        elements=[element], page_confidence={1: _page_confidence(1)}, page_count=1
+    )
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf")
+    assert all(e.model_family is None for e in results[1].entities)
+
+
+def test_extract_kg_candidates_threads_model_family_onto_every_candidate() -> None:
+    """[KG-W1.3, K2] `model_family` is threaded onto every entity/relation
+    produced, regardless of source (text keyword/regex, VLM structured
+    components/connections, VLM description text)."""
+    figure_element = _element(local_id=1, element_type="figure", text=None, page_number=1)
+    text_element = _element(
+        local_id=2, element_type="paragraph", text="Check TH3 near the compressor.", page_number=1
+    )
+    parse_result = DoclingParseResult(
+        elements=[figure_element, text_element],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Uses a solenoid valve.",
+            components=["fan motor"],
+            connections=["fan motor -> TH3"],
+        ),
+    )
+
+    results = kg.extract_kg_candidates(
+        parse_result, "doc.pdf", cascade_results=[cascade_result], model_family="VRV-IV"
+    )
+
+    for candidates in results.values():
+        assert all(e.model_family == "VRV-IV" for e in candidates.entities)
+        assert all(r.model_family == "VRV-IV" for r in candidates.relations)
+    # sanity: this really did exercise all three sources (VLM structured,
+    # VLM description text, and plain text matchers), not a vacuous pass
+    assert len(results[1].entities) == 2  # "fan motor" (component) + "solenoid valve" (description)
+    assert len(results[1].relations) == 1  # fan motor -> TH3
+    assert len(results[2].entities) == 2  # TH3 + compressor
+
+
 def test_extract_kg_candidates_omits_elements_with_no_candidates() -> None:
     element = _element(local_id=1, text="Nothing of interest here.")
     parse_result = DoclingParseResult(

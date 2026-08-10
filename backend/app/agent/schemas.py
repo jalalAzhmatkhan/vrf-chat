@@ -57,7 +57,21 @@ class TechnicalAnswer(BaseModel):
     # HTML, or links — enforced primarily via system prompt
     # (`app/agent/vrf_agent.py`), see that module's docstring.
     answer: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    # [C2.4] Default `0.0` (not just a bound constraint) is a deliberate
+    # streaming-quality fix, not an arbitrary choice: pydantic_ai's
+    # `stream_output()` only surfaces a partial object once every field
+    # *without* a default has appeared in the streamed JSON so far.
+    # `confidence` immediately follows `answer` in this model/the LLM's
+    # tool-call JSON — if it stayed a bare required field (no default), no
+    # partial `answer` text could stream at all until the model finished
+    # emitting `confidence` too, which (since `answer` is usually the
+    # longest field, emitted first) would arrive only once `answer` is
+    # ALREADY fully generated, defeating incremental `token` SSE events
+    # entirely. Verified empirically via a scripted `FunctionModel`
+    # (`tests/unit/test_agent_streaming.py`). The FINAL `confidence` in the
+    # `done` payload is always the model's real value, never this default —
+    # full (non-partial) validation runs once the stream completes.
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     citations: list[Citation] = Field(default_factory=list)
     warnings: list[Warning] = Field(default_factory=list)
     related_components: list[str] = Field(default_factory=list)

@@ -10,11 +10,14 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.vrf_agent import build_agent
 from app.api.v1 import api_v1_router
 from app.api.v1.internal_storage import router as internal_storage_router
 from app.core.config import Settings, get_settings
 from app.core.observability import configure_logging, configure_tracing
 from app.llm_providers.factory import validate_llm_providers_or_raise
+from app.retrieval.embeddings import build_dense_embedding_model, build_sparse_embedding_model
+from app.retrieval.vector_store import build_qdrant_client, validate_vector_store_config_or_raise
 from app.storage.factory import validate_object_storage_or_raise
 
 
@@ -33,6 +36,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_tracing(settings)
     validate_llm_providers_or_raise(settings)
     validate_object_storage_or_raise(settings)
+    # [C2.4] Chat API (app/api/v1/chat.py) now consumes VECTOR_STORE_* —
+    # extend the existing fail-fast-at-startup convention to it too, rather
+    # than discovering a misconfiguration on the first chat request.
+    validate_vector_store_config_or_raise(settings)
 
     app = FastAPI(
         title=settings.APP_NAME,
@@ -46,6 +53,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # [C2.4] Built once per app instance (not per-request, see
+    # app/api/v1/chat.py DIRECT MESSAGE reasoning): `build_agent` and the
+    # Qdrant client wrapper are cheap/no-network at construction time;
+    # `build_dense_embedding_model`/`build_sparse_embedding_model` are also
+    # cheap here specifically because the real fastembed model only loads
+    # lazily on first `.embed()` call — constructing a NEW wrapper per
+    # request would otherwise reload the ONNX model from disk every time.
+    app.state.chat_agent = build_agent(settings)
+    app.state.qdrant_client = build_qdrant_client(settings)
+    app.state.dense_embedding_model = build_dense_embedding_model(settings)
+    app.state.sparse_embedding_model = build_sparse_embedding_model(settings)
 
     app.include_router(api_v1_router, prefix=settings.API_V1_PREFIX)
     app.include_router(internal_storage_router)

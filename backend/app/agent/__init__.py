@@ -11,6 +11,7 @@ from app.agent.answer_postprocess import (
 )
 from app.agent.context_builder import BuiltContext, ContextChunk, ContextElement, build_context
 from app.agent.schemas import Citation, TechnicalAnswer, Warning
+from app.agent.streaming import TurnResult, format_sse_event, run_turn_with_metrics, stream_turn
 from app.agent.tools import AgentDeps
 from app.agent.vrf_agent import build_agent, run_agent_turn
 
@@ -22,10 +23,14 @@ __all__ = [
     "ContextElement",
     "PostProcessResult",
     "TechnicalAnswer",
+    "TurnResult",
     "Warning",
     "build_agent",
     "build_context",
     "enforce_never_invent_safety_net",
+    "format_sse_event",
     "postprocess_answer",
     "run_agent_turn",
+    "run_turn_with_metrics",
+    "stream_turn",
 ]

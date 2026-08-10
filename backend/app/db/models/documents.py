@@ -45,5 +45,11 @@ class Page(Base):
     page_image_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     text_layer_present: Mapped[bool] = mapped_column(Boolean, default=False)
     extraction_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Idempotency (I1.5, 02-ingestion-pipeline.md §5): hash of this page's
+    # source-derived content (extracted text + vector drawing/image counts —
+    # see app/ingestion/canonical_store.py `compute_page_hash`), NOT of any
+    # ML model output, so re-ingesting an unchanged PDF always yields the
+    # same page_hash regardless of Docling/PaddleOCR-VL run-to-run variance.
+    page_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     document: Mapped[Document] = relationship(back_populates="pages")

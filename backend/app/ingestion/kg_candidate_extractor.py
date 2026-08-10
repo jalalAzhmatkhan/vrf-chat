@@ -75,6 +75,38 @@ confirmed:
    triples is not attempted — would violate the determinism/precision bar;
    left to Stage 4 structured-output improvements or Tier 2 R8 GLiREL-based
    relation typing, Wave 2).
+
+**[KG-W1.2, 2026-08-10 — K1 schema fields + K3 non-goal docstring]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §6.1 K1/K3 and
+§9.1 (jsonb field contract). `KGCandidateEntity`/`KGCandidateRelation` gain
+four new fields (`extraction_method`, `canonical_name`, `model_family`,
+`justification_span`) — **no Postgres migration**, the `elements
+.kg_candidate_entities`/`kg_candidate_relations` columns stay `jsonb`
+(schema-flexible by design, `06-data-schema.md`). `canonical_name` and
+`model_family` are added to the *shape* here but are **not populated by
+this module yet**: `canonical_name` needs an alias lookup table
+(`KG-W2.1`/R6, not built yet) and `model_family` needs
+`documents.model_family` joined in by the caller (`KG-W1.3`/K2, the next
+branch in this chain) — both stay `None` for every candidate this module
+currently produces. `extraction_method`/`justification_span` ARE populated
+now (see `_extract_entities_from_text`/`EXTRACTION_METHOD_*` below).
+
+**K3 — merge-by-similarity for relations is an explicit non-goal, not an
+oversight.** Per `09-kg-extraction-strategy.md` §5.2 ("Relasi: Multigraph,
+Bukan Merge"): this module (and any future caller aggregating candidates
+across elements, e.g. the Wave 1 DoD re-extractor) MUST NOT collapse two
+`KGCandidateRelation` records into one just because their
+`(subject, predicate, object)` look alike. Two `CONNECTED_TO` claims about
+the same pair of entities found on two different pages are **two separate
+pieces of evidence** (different `element_id`/`page`), not duplicates — each
+must stay independently traceable back to its own source location
+(`CLAUDE.md` §4 traceability requirement). The **only** sanctioned form of
+combining evidence is cross-source agreement on the exact SAME evidence
+(`KG-W1.7`/R3 — VLM and text extraction agreeing about the same
+`element_id`/page), which raises confidence on a signal field rather than
+deleting/merging records. If a future change ever needs relation
+deduplication for a different reason, that is a new design decision
+requiring System Analyst sign-off, not something to add unilaterally here.
 """
 
 from __future__ import annotations
@@ -140,6 +172,22 @@ RELATION_CONNECTED_TO = "CONNECTED_TO"
 
 _CONNECTION_SPLIT_PATTERN = re.compile(r"\s*(?:->|-{1,2}>|\bto\b)\s*", re.IGNORECASE)
 
+# **[KG-W1.2, K1]** `extraction_method` values — identifies which matcher
+# produced a candidate, see `09-kg-extraction-strategy.md` §9.1
+# (`"regex_sensor_id" | "dict_keyword" | "vlm_component" | dst.`). The
+# `_VLM_DESCRIPTION_SUFFIX` variants are used when `_extract_entities_from_text`
+# runs against `visual_description.description` (VLM markdown) rather than
+# `element.text` (Docling-native narrative text) — same matcher logic, but
+# worth distinguishing because the two source fields have different
+# reliability profiles (see module docstring finding #2).
+EXTRACTION_METHOD_DICT_KEYWORD = "dict_keyword"
+EXTRACTION_METHOD_REGEX_SENSOR_ID = "regex_sensor_id"
+EXTRACTION_METHOD_REGEX_CONNECTOR_ID = "regex_connector_id"
+EXTRACTION_METHOD_REGEX_ERROR_CODE = "regex_error_code"
+EXTRACTION_METHOD_VLM_COMPONENT = "vlm_component"
+EXTRACTION_METHOD_VLM_CONNECTION = "vlm_connection"
+_VLM_DESCRIPTION_SUFFIX = "_vlm_description"
+
 
 @dataclass(slots=True)
 class KGCandidateEntity:
@@ -149,6 +197,23 @@ class KGCandidateEntity:
     source_document: str
     page: int
     element_id: int
+    # **[KG-W1.2, K1]** Every candidate THIS MODULE produces always sets
+    # `extraction_method` explicitly (see `EXTRACTION_METHOD_*` constants
+    # above) — the `""` default exists only so external callers/test
+    # fixtures constructing a `KGCandidateEntity` directly (e.g.
+    # `canonical_store.py`'s tests) don't have to be updated just because
+    # this module gained a new field; it is not a meaningful value on its
+    # own and should never appear on a candidate this module's own
+    # `extract_*` functions returned. `canonical_name`/`model_family` are
+    # schema-only for now (always `None`, populated by later stages — see
+    # module docstring); `justification_span` is `[start, end]` character
+    # offsets into the SOURCE TEXT the match came from (`element.text` or
+    # `visual_description.description`), `None` when not computable
+    # (VLM-structured `components[]`, or no natural offset).
+    extraction_method: str = ""
+    canonical_name: str | None = None
+    model_family: str | None = None
+    justification_span: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -160,6 +225,12 @@ class KGCandidateRelation:
     source_document: str
     page: int
     element_id: int
+    # See `KGCandidateEntity` field docstring above for the rationale of
+    # each of these (identical fields, same defaults/semantics).
+    extraction_method: str = ""
+    canonical_name: str | None = None
+    model_family: str | None = None
+    justification_span: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -192,6 +263,18 @@ def _has_error_code_anchor(text: str | None, section_path: list[str]) -> bool:
     return bool(ERROR_CODE_ANCHOR_PATTERN.search(haystack))
 
 
+def _justification_span(match: re.Match[str], *, compute: bool) -> list[int] | None:
+    """**[KG-W1.2, K1]** `[start, end]` character offsets of `match` within
+    its source text, or `None` when `compute` is `False` (per
+    `09-kg-extraction-strategy.md` §9.1: "null untuk sumber VLM" — offsets
+    into `visual_description.description` are not the contract's
+    `element.text` offsets, so callers extracting from VLM text pass
+    `compute=False`)."""
+    if not compute:
+        return None
+    return [match.start(), match.end()]
+
+
 def _extract_entities_from_text(
     text: str,
     *,
@@ -200,27 +283,34 @@ def _extract_entities_from_text(
     document_ref: str,
     page_number: int,
     element_id: int,
+    is_vlm_description: bool = False,
 ) -> list[KGCandidateEntity]:
     """Deterministic component/sensor/connector/error-code entity matchers,
     shared by `extract_from_text` (`element.text`) and
     `extract_from_visual_description` (Stage 4's `visual_description
     .description` markdown, see module docstring finding #2) — the same
     identifier/keyword is recognized identically regardless of which field
-    it came from."""
+    it came from. `is_vlm_description` controls the `extraction_method`
+    suffix and whether `justification_span` is computed (see K1 field
+    docstrings on `KGCandidateEntity`)."""
     entities: list[KGCandidateEntity] = []
+    method_suffix = _VLM_DESCRIPTION_SUFFIX if is_vlm_description else ""
+    compute_span = not is_vlm_description
 
     # **[KG-W1.1 fix]** Word-boundary match per keyword (was `keyword in
     # text_lower`, a substring check — see `COMPONENT_KEYWORD_PATTERNS`
     # docstring). `is_glossary_like`/reduced confidence: see
     # `COMPONENT_KEYWORD_GLOSSARY_THRESHOLD` docstring above.
-    matched_keywords = [
-        keyword for keyword, pattern in COMPONENT_KEYWORD_PATTERNS.items() if pattern.search(text)
-    ]
-    is_glossary_like = len(matched_keywords) > COMPONENT_KEYWORD_GLOSSARY_THRESHOLD
+    keyword_matches = {
+        keyword: m
+        for keyword in COMPONENT_KEYWORD_PATTERNS
+        if (m := COMPONENT_KEYWORD_PATTERNS[keyword].search(text)) is not None
+    }
+    is_glossary_like = len(keyword_matches) > COMPONENT_KEYWORD_GLOSSARY_THRESHOLD
     keyword_confidence = (
         CONFIDENCE_TEXT_KEYWORD_GLOSSARY_PAGE if is_glossary_like else CONFIDENCE_TEXT_KEYWORD
     )
-    for keyword in matched_keywords:
+    for keyword, kw_match in keyword_matches.items():
         entities.append(
             KGCandidateEntity(
                 name=keyword,
@@ -229,6 +319,8 @@ def _extract_entities_from_text(
                 source_document=document_ref,
                 page=page_number,
                 element_id=element_id,
+                extraction_method=EXTRACTION_METHOD_DICT_KEYWORD + method_suffix,
+                justification_span=_justification_span(kw_match, compute=compute_span),
             )
         )
 
@@ -241,6 +333,8 @@ def _extract_entities_from_text(
                 source_document=document_ref,
                 page=page_number,
                 element_id=element_id,
+                extraction_method=EXTRACTION_METHOD_REGEX_SENSOR_ID + method_suffix,
+                justification_span=_justification_span(match, compute=compute_span),
             )
         )
 
@@ -253,6 +347,8 @@ def _extract_entities_from_text(
                 source_document=document_ref,
                 page=page_number,
                 element_id=element_id,
+                extraction_method=EXTRACTION_METHOD_REGEX_CONNECTOR_ID + method_suffix,
+                justification_span=_justification_span(match, compute=compute_span),
             )
         )
 
@@ -277,6 +373,8 @@ def _extract_entities_from_text(
                     source_document=document_ref,
                     page=page_number,
                     element_id=element_id,
+                    extraction_method=EXTRACTION_METHOD_REGEX_ERROR_CODE + method_suffix,
+                    justification_span=_justification_span(match, compute=compute_span),
                 )
             )
 
@@ -300,6 +398,7 @@ def extract_from_visual_description(
                 source_document=document_ref,
                 page=element.page_number,
                 element_id=element.local_id,
+                extraction_method=EXTRACTION_METHOD_VLM_COMPONENT,
             )
         )
 
@@ -317,6 +416,7 @@ def extract_from_visual_description(
                 source_document=document_ref,
                 page=element.page_number,
                 element_id=element.local_id,
+                extraction_method=EXTRACTION_METHOD_VLM_CONNECTION,
             )
         )
 
@@ -334,6 +434,7 @@ def extract_from_visual_description(
                 document_ref=document_ref,
                 page_number=element.page_number,
                 element_id=element.local_id,
+                is_vlm_description=True,
             )
         )
 

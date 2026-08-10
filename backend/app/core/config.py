@@ -153,8 +153,16 @@ class Settings(BaseSettings):
     # Documentation/system-design/02-ingestion-pipeline.md §3-4 and
     # app/ingestion/docling_parser.py. Only consumed by the GPU ingestion
     # Celery task (backend-worker-gpu), never validated at API startup — see
-    # app/ingestion/docling_parser.py module docstring for rationale. ----
-    DOCLING_DEVICE: Literal["cuda", "cpu"] = "cuda"
+    # app/ingestion/docling_parser.py module docstring for rationale.
+    # DOCLING_DEVICE: [SA1.1 recommendation, ratified by Jalal 2026-08-10]
+    # default changed cuda -> cpu — PaddleOCR-VL's own real VRAM footprint
+    # (~5.92-5.98GB of 6.14GB, see paddleocr-vl-service/README.md) leaves
+    # essentially no headroom to share with a GPU-resident Docling, and
+    # Docling's measured GPU-vs-CPU speedup (~1.4x, I1.6 benchmark) was
+    # judged not worth the OOM risk. `cuda` remains fully supported (no code
+    # change needed) as an explicit override, e.g. for a cloud GPU with more
+    # headroom. ----
+    DOCLING_DEVICE: Literal["cuda", "cpu"] = "cpu"
     DOCLING_ICON_MAX_AREA_RATIO: float = 0.02
     DOCLING_ICON_MAX_DIM_PT: float = 80.0
     # WAJIB true in dev (RTX 3060 6GB) — Docling and PaddleOCR-VL must never
@@ -163,10 +171,14 @@ class Settings(BaseSettings):
 
     # ---- Ingestion Stage 3 — deterministic cascade trigger rules, see
     # Documentation/system-design/02-ingestion-pipeline.md §3 and
-    # app/ingestion/cascade_trigger.py. Starting-point values per design doc
-    # §3 — WAJIB dikalibrasi ulang via I1.6 benchmark before full-volume
-    # ingestion. ----
-    THRESHOLD_TABLE: float = 0.75
+    # app/ingestion/cascade_trigger.py.
+    # THRESHOLD_TABLE: [SA1.1 KALIBRASI FINAL, 2026-08-09] 0.75 -> 0.90,
+    # calibrated from real I1.6 50-page benchmark data (all 27 observed
+    # real table_score values were above the old 0.75 default, so it never
+    # triggered on real content — see 02-ingestion-pipeline.md §3/
+    # docs/i1.6-vram-benchmark-report.md §3.1 for the full distribution).
+    # THRESHOLD_TEXT: unchanged, still a starting point (0.6). ----
+    THRESHOLD_TABLE: float = 0.90
     THRESHOLD_TEXT: float = 0.6
 
     # ---- Ingestion Stage 4 — PaddleOCR-VL cascade, see

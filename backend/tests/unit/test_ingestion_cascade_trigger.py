@@ -267,7 +267,7 @@ def test_multiple_independent_triggers_all_fire_for_same_page() -> None:
 def test_cascade_plan_tasks_of_type_and_defaults() -> None:
     plan = CascadePlan()
     assert plan.tasks == []
-    assert plan.threshold_table == 0.75
+    assert plan.threshold_table == 0.90  # [SA1.1 KALIBRASI FINAL, 2026-08-09] was 0.75
     assert plan.threshold_text == 0.6
     assert plan.tasks_of_type(TASK_TABLE_REPARSE) == []
     assert set(plan.task_counts()) == set(TASK_TYPES)

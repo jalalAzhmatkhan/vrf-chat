@@ -17,8 +17,13 @@ applied to the ingestion side) over the outputs of Stage 1
   if page_text_confidence < THRESHOLD_TEXT:
       queue full_page_ocr
 
-`THRESHOLD_TABLE`/`THRESHOLD_TEXT` are starting points (0.75/0.6 per design
-doc §3), configurable via env, calibrated by the I1.6 benchmark.
+`THRESHOLD_TABLE`/`THRESHOLD_TEXT`, configurable via env — `THRESHOLD_TABLE`
+is **calibrated final** (`0.90`, `SA1.1 2026-08-09`, see
+`02-ingestion-pipeline.md` §3): the I1.6 50-page benchmark found all 27
+real table `table_score` observations above the original `0.75`
+starting-point default, meaning it never actually triggered on real
+content. `THRESHOLD_TEXT` remains a starting point (`0.6`, unchanged by
+SA1.1).
 
 Missing/unresolvable confidence (`None`) is treated conservatively as "queue
 it" (fail-safe) rather than silently skipped — matches the design doc's
@@ -41,7 +46,7 @@ from app.ingestion.native_probe import (
     DocumentProbe,
 )
 
-DEFAULT_THRESHOLD_TABLE = 0.75
+DEFAULT_THRESHOLD_TABLE = 0.90  # [SA1.1 KALIBRASI FINAL, 2026-08-09] was 0.75
 DEFAULT_THRESHOLD_TEXT = 0.6
 
 TASK_TABLE_REPARSE = "table_reparse"

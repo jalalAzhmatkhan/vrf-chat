@@ -1,0 +1,64 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §1/§5 */
+
+.wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.scrollArea {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-4);
+}
+
+.inner {
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 100%;
+}
+
+.newMessagesPill {
+  position: absolute;
+  bottom: var(--space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--color-bg-surface-raised);
+  border: 1px solid var(--color-border-default);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-full);
+  padding: 6px 16px;
+  font-size: var(--font-size-sm);
+  box-shadow: var(--shadow-elevation-2);
+  cursor: pointer;
+  animation: pill-in var(--duration-fast) var(--ease-decelerate);
+}
+
+@keyframes pill-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .newMessagesPill {
+    animation: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .scrollArea {
+    padding: var(--space-4);
+  }
+}

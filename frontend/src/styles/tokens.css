@@ -52,6 +52,16 @@
   --pattern-circuit-grid-opacity: 0.05;
   --pattern-circuit-grid-color: var(--color-accent-cyan);
 
+  /*
+   * 2.6a — Fase 2 (U2.1, chat interface) additions. Deliberately constant
+   * (NOT theme-reactive, no [data-theme='light'] override below) — these
+   * are a wrapper for source-PDF bitmap content (icons/screenshots, usually
+   * light-bg themselves), not a themed surface. See 01-design-system.md
+   * §2.6a for the full rationale.
+   */
+  --color-visual-chip-bg: #eef1f8;
+  --color-visual-chip-border: #cbd2e1;
+
   /* 3.1 — Font pairing */
   --font-family-sans: 'Inter', -apple-system, 'Segoe UI', sans-serif;
   --font-family-display: 'Space Grotesk', 'Inter', sans-serif;

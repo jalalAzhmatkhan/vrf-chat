@@ -1,0 +1,78 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §8 */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.block {
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  animation: fade-in var(--duration-base) var(--ease-decelerate);
+}
+
+.note {
+  background: var(--color-warning-tint);
+  border-left: 3px solid var(--color-warning);
+}
+
+.note .icon,
+.note .title {
+  color: var(--color-text-primary);
+}
+
+.note .icon {
+  color: var(--color-warning);
+}
+
+.safety {
+  background: var(--color-safety-tint);
+  border-left: 3px solid var(--color-safety);
+}
+
+.safety .icon {
+  color: var(--color-safety);
+}
+
+.safety .title {
+  color: var(--color-safety);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.title {
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-sm);
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .block {
+    animation: none;
+  }
+}

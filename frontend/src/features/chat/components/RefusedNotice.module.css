@@ -1,0 +1,39 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §11 */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border-left: 3px solid var(--color-info);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+}
+
+.icon {
+  color: var(--color-info);
+  font-size: var(--font-size-lg);
+}
+
+.title {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.body {
+  margin: 0;
+  padding-left: var(--space-3);
+  color: var(--color-text-primary);
+  line-height: var(--line-height-relaxed);
+}
+
+.hint {
+  margin: 0;
+  padding-left: var(--space-3);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}

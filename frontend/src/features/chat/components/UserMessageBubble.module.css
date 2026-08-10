@@ -1,0 +1,66 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §1 */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  align-self: flex-end;
+  max-width: 65%;
+  animation: message-in var(--duration-base) var(--ease-decelerate);
+}
+
+.bubble {
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text-primary);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.timestamp {
+  margin-top: var(--space-1);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wrap {
+    animation: fade-in var(--duration-fast) var(--ease-standard);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 767px) {
+  .wrap {
+    max-width: 80%;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .wrap {
+    max-width: 75%;
+  }
+}

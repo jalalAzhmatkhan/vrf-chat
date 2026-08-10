@@ -1,0 +1,94 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §7 */
+
+.card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  animation: fade-in var(--duration-fast) var(--ease-standard);
+}
+
+.card + .card {
+  margin-top: var(--space-3);
+}
+
+.body {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-3);
+}
+
+.thumbWrap {
+  flex-shrink: 0;
+  width: 160px;
+  max-height: 220px;
+  background: var(--color-bg-surface-sunken);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.thumb {
+  max-width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+}
+
+.textFallback {
+  flex-shrink: 0;
+  width: 240px;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-2);
+  background: var(--color-bg-surface-sunken);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.caption {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.source {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .body {
+    flex-direction: column;
+  }
+  .thumbWrap,
+  .textFallback {
+    width: 100%;
+  }
+}

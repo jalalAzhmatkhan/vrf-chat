@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from '../shell/AppShell';
 import { LoginPage } from '../pages/LoginPage/LoginPage';
 import { PlaceholderPage } from '../pages/PlaceholderPage';
+import { ChatPage } from '../features/chat/ChatPage';
 
 /**
  * Route shell for Fase 0 — chat/admin routes are placeholders (real content
@@ -22,7 +23,7 @@ export function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
 
       <Route element={<AppShell />}>
-        <Route path="/chat" element={<PlaceholderPage title="Chat" />} />
+        <Route path="/chat" element={<ChatPage />} />
         <Route path="/admin/metrics" element={<PlaceholderPage title="Evaluation Metrics" />} />
         <Route path="/admin/review-queue" element={<PlaceholderPage title="Manual Review Queue" />} />
         <Route path="/admin/rbac/permissions" element={<PlaceholderPage title="Permission Management" />} />

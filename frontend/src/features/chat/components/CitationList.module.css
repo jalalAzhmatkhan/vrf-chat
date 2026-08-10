@@ -1,0 +1,102 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §10 */
+
+.root {
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.summaryRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.toggle {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  color: var(--color-accent-cyan);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: 2px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.row:hover {
+  background: var(--color-bg-surface-raised);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: -2px;
+}
+
+.glyph {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  width: 18px;
+  text-align: center;
+}
+
+.rowBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rowMeta {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.rowQuote {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}

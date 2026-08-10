@@ -1,0 +1,59 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §14 */
+
+.root {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  text-align: center;
+}
+
+.mark {
+  font-size: var(--font-size-3xl);
+  background: var(--gradient-accent);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.heading {
+  font-family: var(--font-family-display);
+  font-size: var(--font-size-lg);
+  color: var(--color-text-primary);
+}
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+  max-width: 640px;
+}
+
+.exampleChip {
+  background: transparent;
+  border: 1px solid var(--color-border-default);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.exampleChip:hover {
+  border-color: var(--color-accent-cyan);
+  color: var(--color-accent-cyan);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.exampleChip:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: 2px;
+}

@@ -1,0 +1,24 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §1 */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  /* AppShell content area already applies --space-6/--space-4 padding —
+     ChatPage needs its own full-bleed scroll/composer region, so negate it
+     here and let MessageList/Composer manage their own inner padding. */
+  margin: calc(var(--space-6) * -1);
+}
+
+@media (max-width: 767px) {
+  .page {
+    margin: calc(var(--space-4) * -1);
+  }
+}
+
+.toolbar {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-3) var(--space-4) 0;
+}

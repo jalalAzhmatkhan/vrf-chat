@@ -1,0 +1,60 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §13 */
+
+.root {
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  padding: var(--space-4) var(--space-4) calc(var(--space-3) + env(safe-area-inset-bottom));
+}
+
+.field {
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  background: var(--color-bg-surface-sunken);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+.field:focus-within {
+  border-color: var(--color-accent-cyan);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.15);
+}
+
+.textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-normal);
+  padding: var(--space-2) 0;
+  max-height: 144px;
+  overflow-y: auto;
+}
+
+.textarea::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.textarea:disabled {
+  color: var(--color-text-disabled);
+}
+
+.sendButton {
+  flex-shrink: 0;
+}
+
+.helper {
+  display: block;
+  max-width: 880px;
+  margin: var(--space-2) auto 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}

@@ -1,0 +1,97 @@
+/* InlineIcon / InlineFigureChip — Documentation/ui-ux-design/04-chat-ui.md §6.2/§6.5 */
+
+.chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin: 0 var(--space-1);
+  background: var(--color-visual-chip-bg);
+  border: 1px solid var(--color-visual-chip-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  box-sizing: content-box;
+  color: var(--color-text-tertiary);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+/* §6.5: 32x32px minimum hit area without enlarging the visual chip itself —
+   an invisible, larger click-catcher layered on top; clicks on it still
+   bubble to this element's own onClick handler. */
+.chip::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+}
+
+.chip:hover,
+.chip:focus-visible {
+  border-color: var(--color-accent-cyan);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--color-accent-cyan);
+  outline-offset: 1px;
+}
+
+.tier1 {
+  height: 24px;
+  min-width: 24px;
+  padding: 2px;
+}
+
+.tier2 {
+  max-height: 64px;
+  max-width: 160px;
+  padding: 4px;
+}
+
+.img {
+  display: block;
+  height: 100%;
+  width: auto;
+  object-fit: contain;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.tier2 .img {
+  max-height: 56px;
+  max-width: 152px;
+}
+
+.imgHidden {
+  opacity: 0;
+  position: absolute;
+}
+
+.imgVisible {
+  opacity: 1;
+}
+
+.placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-bg-surface-raised);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  box-shadow: var(--shadow-elevation-2);
+  z-index: var(--z-tooltip);
+  pointer-events: none;
+}

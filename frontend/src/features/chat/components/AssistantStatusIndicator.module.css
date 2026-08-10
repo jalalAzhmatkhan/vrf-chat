@@ -1,0 +1,48 @@
+/* Documentation/ui-ux-design/04-chat-ui.md §3 */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.label {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.timer {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  margin-left: auto;
+}
+
+.reassurance {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-xs);
+  animation: fade-in var(--duration-base) var(--ease-decelerate);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reassurance {
+    animation: none;
+  }
+}

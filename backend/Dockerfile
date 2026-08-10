@@ -27,13 +27,15 @@
 #
 # NOTE (worker-gpu, I1.10 update — 02-ingestion-pipeline.md §4.0 "Opsi 3"):
 # `worker-gpu` now runs **only** Docling (Stage 2). PaddleOCR-VL (Stage 4)
-# moved to its own standalone service/image, `vrf-chat/paddleocr-vl-service/`
-# — `paddleocr` was REMOVED from this project's pyproject.toml (was briefly
+# moved to its own standalone service/image,
+# `vrf-chat/backend/paddleocr-vl-service/` (moved here from a vrf-chat/
+# top-level sibling per SA1.2 folder-structure review, 2026-08-09) —
+# `paddleocr` was REMOVED from this project's pyproject.toml (was briefly
 # a dependency here during I1.4). Root cause: `paddlepaddle-gpu` (needed for
 # PaddleOCR-VL's layout submodel) and `torch` (Docling) vendor incompatible
 # `nvidia-nccl-cu12` pip packages in the same venv, breaking `import torch`
 # entirely — see `docs/i1.6-vram-benchmark-report.md` §6 and
-# `vrf-chat/paddleocr-vl-service/README.md` for the full finding/live
+# `paddleocr-vl-service/README.md` for the full finding/live
 # verification. `worker-gpu` calls PaddleOCR-VL exclusively via
 # `PADDLE_OCR_VL_BACKEND=remote_api` -> `paddleocr-vl-service` (a Docker
 # Compose neighbor container, not necessarily a network-distant "cloud"

@@ -5,11 +5,16 @@
 # PaddleOCR-VL always runs as a separate container/service, called by
 # backend-worker-gpu via PADDLE_OCR_VL_BACKEND=remote_api, even in dev).
 #
-# Deliberately its OWN image/venv/pyproject.toml/uv.lock, entirely separate
-# from vrf-chat/backend/ — this is the whole point of the Opsi 3 decision:
-# torch (Docling, backend/) and paddlepaddle-gpu (this service) must never
-# resolve into the same Python environment (see README.md "Why a separate
-# service" for the real conflict this avoids).
+# Deliberately its OWN image/venv/pyproject.toml/uv.lock — this is the whole
+# point of the Opsi 3 decision: torch (Docling, ../) and paddlepaddle-gpu
+# (this service) must never resolve into the same Python environment (see
+# README.md "Why a separate service" for the real conflict this avoids).
+# Living under vrf-chat/backend/paddleocr-vl-service/ (moved here from a
+# vrf-chat/ top-level sibling per SA1.2 folder-structure review, 2026-08-09)
+# is purely a source-location/ownership convenience — this Dockerfile's own
+# `context: ./backend/paddleocr-vl-service` in docker-compose.yml still
+# builds a fully independent image, no dependency resolution is shared with
+# ../Dockerfile.
 #
 # No special CUDA base image needed (verified live during I1.10, same
 # finding as backend/Dockerfile's worker-gpu stage for Docling/torch):

@@ -211,6 +211,40 @@ the main per-element extraction loop:
   now. Revisit once a second relation-extraction mechanism exists (e.g.
   `KG-W2.4`/R8's GLiREL-based typing), reusing the same page+key pattern
   above.
+
+**[SA-KG.1, 2026-08-10 — cross-vendor vocabulary UNION]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §11.2/§11.2.1/
+§11.2.2. Following SA-KG.1's clean verification of Wave 1 (no bugs found
+across all 7 branches — see `vrf_vocabulary.py` for the full empirical
+scan behind this decision), System Analyst directed three priority-now
+vocabulary additions, all implemented as an unconditional UNION (every
+pattern tried against every document, no `model_family`-based routing —
+see `vrf_vocabulary.py` module docstring for why this is safe):
+
+1. `SENSOR_ID_PATTERN_DAIKIN` (`R#T`) tried alongside the existing
+   Mitsubishi `SENSOR_ID_PATTERN` (`TH#`) — both produce `entity_type=
+   "Sensor"` candidates, distinguished only by `extraction_method`
+   (`regex_sensor_id` vs `regex_sensor_id_daikin`).
+2. `ERROR_CODE_MAIN_PATTERN`/`ERROR_CODE_SUBCODE_PATTERN` replace the old
+   single-shape `ERROR_CODE_PATTERN` — now matches Daikin's two-letter main
+   codes (`AH`/`AJ`/`UA`) alongside the original Mitsubishi single-letter
+   form, AND extracts main-code-only and main+subcode as two SEPARATE
+   `ErrorCode` candidates per match location (§11.2.1's explicit
+   dual-granularity decision — deliberately not choosing one over the
+   other). Both still go through the exact same anchor+confidence-tiering
+   discipline `KG-W1.1` built — this is a recall extension within an
+   already-established precision safety net, not a new one.
+3. `TERMINAL_ID_PATTERN` (`X#M`) — a NEW identifier pattern (not
+   previously present for any vendor) for the existing `Terminal` node
+   type, closing the same "keyword-only, no precise identifier regex" gap
+   for `Terminal` that `SENSOR_ID_PATTERN`/`SENSOR_ID_PATTERN_DAIKIN`
+   already closed for `Sensor`.
+
+Explicitly NOT implemented in this branch (System Analyst: Wave 2 backlog,
+"beri ke Fase 3 review dulu untuk validasi domain expert"): pressure sensor
+(`S#PH`), valve (`Y#E`/`Y#S`), motor (`M#C`/`M#F`), relay (`K#R`), fuse
+(`F#U`), breaker (`Q#`) — regex starting points captured as a comment in
+`vrf_vocabulary.py` so the research doesn't need to be redone.
 """
 
 from __future__ import annotations
@@ -224,8 +258,11 @@ from app.domain.vrf_vocabulary import (
     COMPONENT_KEYWORDS,
     CONNECTOR_ID_PATTERN,
     ERROR_CODE_ANCHOR_PATTERN,
-    ERROR_CODE_PATTERN,
+    ERROR_CODE_MAIN_PATTERN,
+    ERROR_CODE_SUBCODE_PATTERN,
     SENSOR_ID_PATTERN,
+    SENSOR_ID_PATTERN_DAIKIN,
+    TERMINAL_ID_PATTERN,
 )
 from app.ingestion.docling_parser import ELEMENT_TYPE_TABLE, DoclingParseResult, ElementDraft
 from app.ingestion.paddleocr_vl_cascade import CascadeResult
@@ -239,6 +276,13 @@ CONFIDENCE_VLM_CONNECTION = 0.5
 CONFIDENCE_TEXT_KEYWORD = 0.5
 CONFIDENCE_SENSOR_ID = 0.7
 CONFIDENCE_CONNECTOR_ID = 0.7
+# **[SA-KG.1, cross-vendor union]** Same confidence tier as the other
+# identifier-regex matches above — `SENSOR_ID_PATTERN_DAIKIN`/
+# `TERMINAL_ID_PATTERN` are structurally the same kind of match (anchored
+# alphanumeric identifier, not free-text keyword), just a different
+# vendor's naming convention (see `vrf_vocabulary.py` module docstring
+# "SA-KG.1" section for the union decision).
+CONFIDENCE_TERMINAL_ID = 0.7
 
 # **[KG-W1.1 fix]** `element_type == "error_code"` (formerly
 # `CONFIDENCE_ERROR_CODE_ELEMENT_TYPE = 0.8`) was confirmed dead code — no
@@ -246,10 +290,10 @@ CONFIDENCE_CONNECTOR_ID = 0.7
 # (`docling_parser._LABEL_TO_ELEMENT_TYPE`), and no Stage 3/4 code re-tags
 # any element to it either, so this branch has never once fired on real
 # ingested data (`document_id=3`: 0 elements with `element_type ==
-# "error_code"`, despite 192 `ERROR_CODE_PATTERN` matches all landing in the
-# `else` branch at the old flat `CONFIDENCE_ERROR_CODE_PATTERN = 0.4`).
-# Replaced with the heuristic explicitly suggested as an alternative in
-# `09-kg-extraction-strategy.md` §5.4: "elemen tabel + heading error
+# "error_code"`, despite 192 `ERROR_CODE_MAIN_PATTERN` matches all landing
+# in the `else` branch at the old flat `CONFIDENCE_ERROR_CODE_PATTERN =
+# 0.4`). Replaced with the heuristic explicitly suggested as an alternative
+# in `09-kg-extraction-strategy.md` §5.4: "elemen tabel + heading error
 # code/malfunction code terdekat" — implemented as
 # `_has_error_code_anchor()` below (checks `element.text` and
 # `element.section_path` for `ERROR_CODE_ANCHOR_PATTERN`), with a table
@@ -257,7 +301,11 @@ CONFIDENCE_CONNECTOR_ID = 0.7
 # to grant, a non-table element with an anchor getting a middle tier, and
 # an unanchored match getting a confidence *lower* than the old flat value
 # (empirically, unanchored matches are mostly noise — see
-# `ERROR_CODE_ANCHOR_PATTERN` docstring in `vrf_vocabulary.py`).
+# `ERROR_CODE_ANCHOR_PATTERN` docstring in `vrf_vocabulary.py`). Applies
+# identically to `ERROR_CODE_MAIN_PATTERN` and `ERROR_CODE_SUBCODE_PATTERN`
+# matches (**[SA-KG.1, §11.2.1]** the two-granularity Daikin extension) —
+# same anchor computed once per element, same three tiers, no separate
+# confidence scheme for the subcode-level candidates.
 CONFIDENCE_ERROR_CODE_TABLE_ANCHORED = 0.75
 CONFIDENCE_ERROR_CODE_ANCHORED = 0.6
 CONFIDENCE_ERROR_CODE_UNANCHORED = 0.3
@@ -290,6 +338,20 @@ EXTRACTION_METHOD_REGEX_CONNECTOR_ID = "regex_connector_id"
 EXTRACTION_METHOD_REGEX_ERROR_CODE = "regex_error_code"
 EXTRACTION_METHOD_VLM_COMPONENT = "vlm_component"
 EXTRACTION_METHOD_VLM_CONNECTION = "vlm_connection"
+# **[SA-KG.1, cross-vendor union]** Distinct `extraction_method` values per
+# vendor convention (rather than reusing the Mitsubishi-pattern constants
+# above) — deliberately, so recall per pattern is independently queryable
+# from `elements.kg_candidate_entities` jsonb (`extraction_method =
+# 'regex_sensor_id_daikin'`) without a separate ad-hoc script, exactly what
+# was needed to compare `R#T` vs `TH#` impact empirically for this task.
+EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN = "regex_sensor_id_daikin"
+EXTRACTION_METHOD_REGEX_TERMINAL_ID = "regex_terminal_id"
+# **[SA-KG.1, §11.2.1]** Main-code candidates (`A6`, `AH`, `UA`, and the
+# original Mitsubishi-style `P8`/`U4`) reuse `EXTRACTION_METHOD_REGEX_ERROR_CODE`
+# above unchanged — same granularity concept regardless of which vendor's
+# character-class branch matched. Subcode candidates (`A6-01`) get their
+# own value so the two granularities are independently distinguishable.
+EXTRACTION_METHOD_REGEX_ERROR_CODE_SUBCODE = "regex_error_code_subcode"
 _VLM_DESCRIPTION_SUFFIX = "_vlm_description"
 
 
@@ -462,6 +524,25 @@ def _extract_entities_from_text(
             )
         )
 
+    # **[SA-KG.1, cross-vendor union]** Daikin sensor convention, tried
+    # unconditionally alongside the Mitsubishi one above — see
+    # `vrf_vocabulary.py` module docstring "SA-KG.1" section for why union
+    # (not per-vendor routing) is safe here.
+    for match in SENSOR_ID_PATTERN_DAIKIN.finditer(text):
+        entities.append(
+            KGCandidateEntity(
+                name=match.group(0),
+                entity_type="Sensor",
+                confidence=CONFIDENCE_SENSOR_ID,
+                source_document=document_ref,
+                page=page_number,
+                element_id=element_id,
+                extraction_method=EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN + method_suffix,
+                justification_span=_justification_span(match, compute=compute_span),
+                model_family=model_family,
+            )
+        )
+
     for match in CONNECTOR_ID_PATTERN.finditer(text):
         entities.append(
             KGCandidateEntity(
@@ -477,11 +558,33 @@ def _extract_entities_from_text(
             )
         )
 
-    if ERROR_CODE_PATTERN.search(text):
+    # **[SA-KG.1, §11.2.2, cross-vendor union]** Daikin terminal block
+    # convention — NOT the Mitsubishi `CONNECTOR_ID_PATTERN`'s counterpart
+    # (Daikin's connector-reference system is different entirely; `X#M` is
+    # Daikin's *terminal block* identifier, see `vrf_vocabulary.py`).
+    for match in TERMINAL_ID_PATTERN.finditer(text):
+        entities.append(
+            KGCandidateEntity(
+                name=match.group(0),
+                entity_type="Terminal",
+                confidence=CONFIDENCE_TERMINAL_ID,
+                source_document=document_ref,
+                page=page_number,
+                element_id=element_id,
+                extraction_method=EXTRACTION_METHOD_REGEX_TERMINAL_ID + method_suffix,
+                justification_span=_justification_span(match, compute=compute_span),
+                model_family=model_family,
+            )
+        )
+
+    if ERROR_CODE_MAIN_PATTERN.search(text):
         # **[KG-W1.1 fix, R4]** Confidence now depends on contextual anchor
         # presence (see `_has_error_code_anchor`/`CONFIDENCE_ERROR_CODE_*`
         # docstrings above) instead of the old dead `element_type ==
         # "error_code"` branch / flat confidence for everything else.
+        # **[SA-KG.1, §11.2.1]** Applies identically to the main-code AND
+        # subcode extraction below — one anchor computation, shared by both
+        # granularities.
         anchor_matched = _has_error_code_anchor(text, section_path)
         if element_type == ELEMENT_TYPE_TABLE and anchor_matched:
             error_code_confidence = CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
@@ -489,7 +592,8 @@ def _extract_entities_from_text(
             error_code_confidence = CONFIDENCE_ERROR_CODE_ANCHORED
         else:
             error_code_confidence = CONFIDENCE_ERROR_CODE_UNANCHORED
-        for match in ERROR_CODE_PATTERN.finditer(text):
+
+        for match in ERROR_CODE_MAIN_PATTERN.finditer(text):
             entities.append(
                 KGCandidateEntity(
                     name=match.group(1),
@@ -501,10 +605,32 @@ def _extract_entities_from_text(
                     extraction_method=EXTRACTION_METHOD_REGEX_ERROR_CODE + method_suffix,
                     justification_span=_justification_span(match, compute=compute_span),
                     model_family=model_family,
-                    # **[KG-W1.4, K4]** `ERROR_CODE_PATTERN` is the one
+                    # **[KG-W1.4, K4]** `ERROR_CODE_MAIN_PATTERN` is the one
                     # "low-precision pattern" this module has today — expose
                     # the exact anchor signal that already determined
                     # `error_code_confidence`, not just its downstream effect.
+                    context_anchor_matched=anchor_matched,
+                )
+            )
+
+        # **[SA-KG.1, §11.2.1]** Main+subcode as a SEPARATE, more
+        # diagnostically precise candidate — `name` is the normalized
+        # `"{main}-{subcode}"` rendering (not the literal raw span, which
+        # may contain extra whitespace around the dash, e.g. `"A6 - 01"`)
+        # — `justification_span` still points at the real, literal match
+        # location in `text`, just the `name` value is cleaned up.
+        for sub_match in ERROR_CODE_SUBCODE_PATTERN.finditer(text):
+            entities.append(
+                KGCandidateEntity(
+                    name=f"{sub_match.group(1)}-{sub_match.group(2)}",
+                    entity_type="ErrorCode",
+                    confidence=error_code_confidence,
+                    source_document=document_ref,
+                    page=page_number,
+                    element_id=element_id,
+                    extraction_method=EXTRACTION_METHOD_REGEX_ERROR_CODE_SUBCODE + method_suffix,
+                    justification_span=_justification_span(sub_match, compute=compute_span),
+                    model_family=model_family,
                     context_anchor_matched=anchor_matched,
                 )
             )

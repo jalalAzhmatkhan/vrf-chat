@@ -159,13 +159,20 @@ class PaddleOCRVLClient(Protocol):
 # Bbox rendering (shared with I1.5 canonical store for the crop it persists)
 # ---------------------------------------------------------------------------
 
+# [C2.5] Single source of truth for the render DPI, so
+# `app/api/v1/documents.py` (image_width_px/image_height_px, per
+# 05-streaming-and-api-contract.md §5.5) computes pixel dimensions using the
+# exact same DPI this function actually renders at, instead of a duplicated
+# magic number that could silently drift out of sync.
+PAGE_RENDER_DPI_DEFAULT = 200
+
 
 def render_bbox_crop(
     pdf_path: str | Path,
     page_number: int,
     bbox: dict[str, Any] | None = None,
     *,
-    dpi: int = 200,
+    dpi: int = PAGE_RENDER_DPI_DEFAULT,
 ) -> bytes:
     """Render a page (or a bbox region within it) to PNG bytes via PyMuPDF.
 

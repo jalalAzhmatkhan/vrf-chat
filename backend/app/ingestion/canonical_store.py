@@ -235,6 +235,10 @@ def store_pages_and_elements(
                 text_layer_present=text_layer_present,
                 extraction_method="docling",
                 page_hash=page_hash,
+                # C2.5 / 05-streaming-and-api-contract.md §5.5 gap fix — no
+                # extra I/O, `pymupdf_page` is already open in this loop.
+                page_width_pt=pymupdf_page.rect.width,
+                page_height_pt=pymupdf_page.rect.height,
             )
             db.add(new_page)
             db.flush()

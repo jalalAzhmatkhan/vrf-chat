@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -53,6 +53,16 @@ class Page(Base):
     page_image_uri: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     text_layer_present: Mapped[bool] = mapped_column(Boolean, default=False)
     extraction_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # [C2.5, 2026-08-10] Original PDF page dimensions in PDF points (72pt =
+    # 1in), read via `pymupdf.Page.rect` — needed by the FE citation viewer
+    # to scale bbox overlays (`elements.bbox`, PDF-points/bottom-left-origin
+    # per 05-streaming-and-api-contract.md §5.5) onto the rendered
+    # `page_image_uri`. See `app/ingestion/canonical_store.py`
+    # `store_pages_and_elements` for where this is populated, and
+    # `scripts/backfill_page_dimensions.py` for the one-off backfill of
+    # pages ingested before this column existed.
+    page_width_pt: Mapped[float | None] = mapped_column(Float, nullable=True)
+    page_height_pt: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Idempotency (I1.5, 02-ingestion-pipeline.md §5): hash of this page's
     # source-derived content (extracted text + vector drawing/image counts —
     # see app/ingestion/canonical_store.py `compute_page_hash`), NOT of any

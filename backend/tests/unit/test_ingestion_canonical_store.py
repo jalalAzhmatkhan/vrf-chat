@@ -249,6 +249,8 @@ def test_store_pages_and_elements_basic_insert(tmp_path: Path) -> None:
     assert len(pages) == 1
     assert pages[0].page_hash is not None
     assert pages[0].page_image_uri == f"fake://documents/{document.id}/pages/1/page.png"
+    assert pages[0].page_width_pt is not None and pages[0].page_width_pt > 0
+    assert pages[0].page_height_pt is not None and pages[0].page_height_pt > 0
     assert len(elements) == 1
     assert elements[0].text == "Press the button."
 

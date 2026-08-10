@@ -109,6 +109,53 @@ def test_parse_connection_empty_side_returns_none() -> None:
     assert kg._parse_connection("TH3 -> ") is None
 
 
+def test_extract_from_visual_description_entities_from_description_text() -> None:
+    """[KG-W1.1] Real Stage 4 output never populates `components`/
+    `connections` (see module docstring finding #1) but DOES populate
+    `description` (markdown/free text) — the same deterministic matchers
+    used for narrative `element.text` now also mine entities from it."""
+    element = _element(local_id=9, element_type="figure", page_number=5)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=5, element_local_id=9, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="A1P PRINTED CIRCUIT BOARD (MAIN), connected via CN105.",
+            components=[],
+            connections=[],
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "printed circuit board" in names
+    assert "CN105" in names
+    for entity in result.entities:
+        assert entity.page == 5
+        assert entity.element_id == 9
+    # Relations are NOT parsed from free text (would violate the
+    # determinism/precision bar) — description-derived entities only.
+    assert result.relations == []
+
+
+def test_extract_from_visual_description_no_description_no_extra_entities() -> None:
+    element = _element(local_id=1, element_type="figure")
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(description=None, components=[], connections=[]),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    assert result.entities == []
+
+
+def test_has_error_code_anchor_checks_text_and_section_path() -> None:
+    assert kg._has_error_code_anchor("If error code P8 appears", []) is True
+    assert kg._has_error_code_anchor("P8", ["Malfunction Code Table"]) is True
+    assert kg._has_error_code_anchor("Just some ordinary text with P8", []) is False
+    assert kg._has_error_code_anchor(None, []) is False
+
+
 # ---------------------------------------------------------------------------
 # extract_from_text
 # ---------------------------------------------------------------------------
@@ -144,16 +191,11 @@ def test_extract_from_text_sensor_and_connector_ids() -> None:
     assert connector.confidence == kg.CONFIDENCE_CONNECTOR_ID
 
 
-def test_extract_from_text_error_code_element_type() -> None:
-    element = _element(element_type="error_code", text="P8")
-    result = kg.extract_from_text(element, "doc.pdf")
-    assert len(result.entities) == 1
-    assert result.entities[0].entity_type == "ErrorCode"
-    assert result.entities[0].name == "P8"
-    assert result.entities[0].confidence == kg.CONFIDENCE_ERROR_CODE_ELEMENT_TYPE
-
-
-def test_extract_from_text_error_code_pattern_in_paragraph() -> None:
+def test_extract_from_text_error_code_pattern_anchored_in_own_text() -> None:
+    """[KG-W1.1] An anchor keyword ("error code") in the SAME element's text
+    elevates confidence above the unanchored tier — replaces the old dead
+    `element_type == "error_code"` branch (confirmed never produced by
+    Docling for any real document, see module docstring)."""
     element = _element(
         element_type="paragraph", text="If error code P8 appears, check the water flow sensor."
     )
@@ -161,7 +203,54 @@ def test_extract_from_text_error_code_pattern_in_paragraph() -> None:
     error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
     assert len(error_codes) == 1
     assert error_codes[0].name == "P8"
-    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_PATTERN
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_ANCHORED
+
+
+def test_extract_from_text_error_code_anchored_via_section_path() -> None:
+    """[KG-W1.1] Anchor keyword found in the heading hierarchy
+    (`section_path`), not the element's own text — e.g. a table row under a
+    "Malfunction Code Table" heading."""
+    element = _element(
+        element_type="paragraph",
+        text="P8",
+        section_path=["Troubleshooting", "Malfunction Code Table"],
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_ANCHORED
+
+
+def test_extract_from_text_error_code_table_element_anchored_highest_confidence() -> None:
+    """[KG-W1.1] Table element + anchor = the heuristic replacement for the
+    old dead-code high-confidence branch, per
+    `09-kg-extraction-strategy.md` §5.4 ("elemen tabel + heading error
+    code/malfunction code terdekat")."""
+    element = _element(
+        element_type="table",
+        text="| Error code | Description |\n| P8 | Water flow error |",
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+
+
+def test_extract_from_text_error_code_pattern_unanchored_low_confidence() -> None:
+    """[KG-W1.1] No anchor keyword anywhere nearby -> lower confidence than
+    the pre-fix flat value (0.4), reflecting the empirically-confirmed high
+    false-positive rate of unanchored matches (document_id=3: 192/192
+    ErrorCode candidates were unanchored, spanning near-alphabet-wide
+    coverage inconsistent with real VRF error code allocation)."""
+    element = _element(
+        element_type="paragraph", text="The unit code is P8 for this configuration."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].name == "P8"
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_UNANCHORED
+    assert error_codes[0].confidence < 0.4
 
 
 def test_extract_from_text_no_matches_returns_empty() -> None:
@@ -169,6 +258,58 @@ def test_extract_from_text_no_matches_returns_empty() -> None:
     result = kg.extract_from_text(element, "doc.pdf")
     assert result.entities == []
     assert result.relations == []
+
+
+def test_extract_from_text_component_keyword_word_boundary_rejects_substring() -> None:
+    """[KG-W1.1] Word-boundary fix: "fan motor" must NOT match inside "fan
+    motors" (the old `keyword in text_lower` substring check would have
+    incorrectly matched this)."""
+    element = _element(text="Check the fan motors and controls for wear.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "fan motor" not in names
+
+
+def test_extract_from_text_component_keyword_glossary_page_lower_confidence() -> None:
+    """[KG-W1.1] More than `COMPONENT_KEYWORD_GLOSSARY_THRESHOLD` distinct
+    keyword matches on one element (a real pattern found on document_id=3,
+    14/20 keywords matched simultaneously) is treated as a likely
+    glossary/spec-list page, at reduced confidence."""
+    element = _element(
+        text=(
+            "compressor, condenser, evaporator, expansion valve, "
+            "solenoid valve, fan motor, accumulator"
+        )
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    component_entities = [e for e in result.entities if e.entity_type == "Component"]
+    assert len(component_entities) == 7
+    assert all(e.confidence == kg.CONFIDENCE_TEXT_KEYWORD_GLOSSARY_PAGE for e in component_entities)
+
+
+def test_extract_from_text_component_keyword_below_glossary_threshold_normal_confidence() -> None:
+    element = _element(text="Check the compressor and condenser for leaks.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    component_entities = [e for e in result.entities if e.entity_type == "Component"]
+    assert len(component_entities) == 2
+    assert all(e.confidence == kg.CONFIDENCE_TEXT_KEYWORD for e in component_entities)
+
+
+def test_extract_from_text_sensor_id_space_and_dash_variants() -> None:
+    """[KG-W1.1, R-addendum] `TH 3`/`TH-3` (space/dash separator) must be
+    recognized, not just `TH3` — confirmed recall bug against document_id=3
+    real data (see vrf_vocabulary.py SENSOR_ID_PATTERN docstring)."""
+    element = _element(text="Measure resistance between TH 3 and TH-4.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"TH 3", "TH-4"}
+
+
+def test_extract_from_text_connector_id_space_and_dash_variants() -> None:
+    element = _element(text="Connectors CN 105 and CN-106 are both used.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    connector_names = {e.name for e in result.entities if e.entity_type == "Connector"}
+    assert connector_names == {"CN 105", "CN-106"}
 
 
 # ---------------------------------------------------------------------------

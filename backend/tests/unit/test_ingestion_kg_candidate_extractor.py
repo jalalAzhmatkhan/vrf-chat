@@ -81,11 +81,19 @@ def test_extract_from_visual_description_components_and_connections() -> None:
     assert result.entities[0].source_document == "doc.pdf"
     assert result.entities[0].page == 3
     assert result.entities[0].element_id == 5
+    # [KG-W1.2, K1] VLM-structured entities: extraction_method fixed,
+    # canonical_name/model_family not yet populated by this module,
+    # justification_span not computable (no offset into `components[]`).
+    assert result.entities[0].extraction_method == kg.EXTRACTION_METHOD_VLM_COMPONENT
+    assert result.entities[0].canonical_name is None
+    assert result.entities[0].model_family is None
+    assert result.entities[0].justification_span is None
 
     assert len(result.relations) == 2
     assert result.relations[0].subject == "compressor"
     assert result.relations[0].predicate == kg.RELATION_CONNECTED_TO
     assert result.relations[0].object == "TH3"
+    assert result.relations[0].extraction_method == kg.EXTRACTION_METHOD_VLM_CONNECTION
     assert result.relations[1].subject == "TH3"
     assert result.relations[1].object == "PCB"
 
@@ -109,6 +117,53 @@ def test_parse_connection_empty_side_returns_none() -> None:
     assert kg._parse_connection("TH3 -> ") is None
 
 
+def test_extract_from_visual_description_entities_from_description_text() -> None:
+    """[KG-W1.1] Real Stage 4 output never populates `components`/
+    `connections` (see module docstring finding #1) but DOES populate
+    `description` (markdown/free text) — the same deterministic matchers
+    used for narrative `element.text` now also mine entities from it."""
+    element = _element(local_id=9, element_type="figure", page_number=5)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=5, element_local_id=9, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="A1P PRINTED CIRCUIT BOARD (MAIN), connected via CN105.",
+            components=[],
+            connections=[],
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "printed circuit board" in names
+    assert "CN105" in names
+    for entity in result.entities:
+        assert entity.page == 5
+        assert entity.element_id == 9
+    # Relations are NOT parsed from free text (would violate the
+    # determinism/precision bar) — description-derived entities only.
+    assert result.relations == []
+
+
+def test_extract_from_visual_description_no_description_no_extra_entities() -> None:
+    element = _element(local_id=1, element_type="figure")
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(description=None, components=[], connections=[]),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    assert result.entities == []
+
+
+def test_has_error_code_anchor_checks_text_and_section_path() -> None:
+    assert kg._has_error_code_anchor("If error code P8 appears", []) is True
+    assert kg._has_error_code_anchor("P8", ["Malfunction Code Table"]) is True
+    assert kg._has_error_code_anchor("Just some ordinary text with P8", []) is False
+    assert kg._has_error_code_anchor(None, []) is False
+
+
 # ---------------------------------------------------------------------------
 # extract_from_text
 # ---------------------------------------------------------------------------
@@ -129,6 +184,128 @@ def test_extract_from_text_component_keyword() -> None:
     entity = next(e for e in result.entities if e.name == "compressor")
     assert entity.entity_type == "Component"
     assert entity.confidence == kg.CONFIDENCE_TEXT_KEYWORD
+    # [KG-W1.2, K1]
+    assert entity.extraction_method == kg.EXTRACTION_METHOD_DICT_KEYWORD
+    assert entity.canonical_name is None
+    assert entity.model_family is None
+    text = element.text
+    assert text is not None
+    assert entity.justification_span is not None
+    start, end = entity.justification_span
+    assert text[start:end].lower() == "compressor"
+
+
+def test_extract_from_text_sensor_id_justification_span() -> None:
+    """[KG-W1.2, K1] `justification_span` is the exact `[start, end]`
+    character offset of the match within `element.text`."""
+    element = _element(text="Measure the resistance of TH3 connected via CN105.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor = next(e for e in result.entities if e.entity_type == "Sensor")
+    assert sensor.extraction_method == kg.EXTRACTION_METHOD_REGEX_SENSOR_ID
+    text = element.text
+    assert text is not None
+    assert sensor.justification_span is not None
+    start, end = sensor.justification_span
+    assert text[start:end] == "TH3"
+
+    connector = next(e for e in result.entities if e.entity_type == "Connector")
+    assert connector.extraction_method == kg.EXTRACTION_METHOD_REGEX_CONNECTOR_ID
+    assert connector.justification_span is not None
+    start, end = connector.justification_span
+    assert text[start:end] == "CN105"
+
+
+def test_extract_from_text_error_code_extraction_method() -> None:
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE
+    assert error_code.justification_span is not None
+
+
+def test_extract_from_text_error_code_context_anchor_matched_true_when_anchored() -> None:
+    """[KG-W1.4, K4] `context_anchor_matched` exposes the exact boolean that
+    already determined the confidence tier (KG-W1.1) — not just implicit in
+    the confidence value."""
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.context_anchor_matched is True
+
+
+def test_extract_from_text_error_code_context_anchor_matched_false_when_unanchored() -> None:
+    element = _element(text="The unit code is P8 for this configuration.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.context_anchor_matched is False
+
+
+def test_extract_from_text_non_error_code_entities_context_anchor_matched_none() -> None:
+    """[KG-W1.4, K4] `context_anchor_matched` is only meaningful for
+    `ErrorCode` (the one low-precision pattern) — `None`, not `False`, for
+    Sensor/Connector/Component candidates (there's no anchor concept to
+    report for them, this isn't "unset")."""
+    element = _element(text="Measure TH3 near the compressor, connected via CN105.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    assert result.entities  # sanity: matchers did fire
+    for entity in result.entities:
+        assert entity.entity_type != "ErrorCode"
+        assert entity.context_anchor_matched is None
+
+
+def test_extract_from_text_cross_source_fields_default_unpopulated() -> None:
+    """[KG-W1.4, K4] cross_source_corroborated/corroboration_count are added
+    by this branch but NOT populated (that's KG-W1.7/R3) — every candidate
+    from this module defaults to `False`/`0`."""
+    element = _element(text="Check TH3 near the compressor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    assert result.entities
+    for entity in result.entities:
+        assert entity.cross_source_corroborated is False
+        assert entity.corroboration_count == 0
+
+
+def test_extract_from_visual_description_relation_type_constraint_violated_default_none() -> None:
+    """[KG-W1.4, K4] type_constraint_violated (KGCandidateRelation only) is a
+    placeholder — always None until KG-W2.3 (R9)."""
+    element = _element(local_id=5, element_type="figure", page_number=3)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=3, element_local_id=5, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description=None, components=[], connections=["compressor -> TH3"]
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    assert len(result.relations) == 1
+    assert result.relations[0].type_constraint_violated is None
+    assert result.relations[0].context_anchor_matched is None
+    assert result.relations[0].cross_source_corroborated is False
+    assert result.relations[0].corroboration_count == 0
+
+
+def test_extract_from_visual_description_description_entities_use_vlm_suffix_and_no_span() -> None:
+    """[KG-W1.2, K1] Entities extracted from `visual_description.description`
+    (not `element.text`) get an `extraction_method` suffix distinguishing the
+    source, and `justification_span=None` per the K1 contract ("null untuk
+    sumber VLM")."""
+    element = _element(local_id=9, element_type="figure", page_number=5)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=5, element_local_id=9, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Check the compressor and TH3.", components=[], connections=[]
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "compressor" in names
+    assert "TH3" in names
+    for entity in result.entities:
+        assert entity.extraction_method.endswith("_vlm_description")
+        assert entity.justification_span is None
 
 
 def test_extract_from_text_sensor_and_connector_ids() -> None:
@@ -144,16 +321,11 @@ def test_extract_from_text_sensor_and_connector_ids() -> None:
     assert connector.confidence == kg.CONFIDENCE_CONNECTOR_ID
 
 
-def test_extract_from_text_error_code_element_type() -> None:
-    element = _element(element_type="error_code", text="P8")
-    result = kg.extract_from_text(element, "doc.pdf")
-    assert len(result.entities) == 1
-    assert result.entities[0].entity_type == "ErrorCode"
-    assert result.entities[0].name == "P8"
-    assert result.entities[0].confidence == kg.CONFIDENCE_ERROR_CODE_ELEMENT_TYPE
-
-
-def test_extract_from_text_error_code_pattern_in_paragraph() -> None:
+def test_extract_from_text_error_code_pattern_anchored_in_own_text() -> None:
+    """[KG-W1.1] An anchor keyword ("error code") in the SAME element's text
+    elevates confidence above the unanchored tier — replaces the old dead
+    `element_type == "error_code"` branch (confirmed never produced by
+    Docling for any real document, see module docstring)."""
     element = _element(
         element_type="paragraph", text="If error code P8 appears, check the water flow sensor."
     )
@@ -161,7 +333,54 @@ def test_extract_from_text_error_code_pattern_in_paragraph() -> None:
     error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
     assert len(error_codes) == 1
     assert error_codes[0].name == "P8"
-    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_PATTERN
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_ANCHORED
+
+
+def test_extract_from_text_error_code_anchored_via_section_path() -> None:
+    """[KG-W1.1] Anchor keyword found in the heading hierarchy
+    (`section_path`), not the element's own text — e.g. a table row under a
+    "Malfunction Code Table" heading."""
+    element = _element(
+        element_type="paragraph",
+        text="P8",
+        section_path=["Troubleshooting", "Malfunction Code Table"],
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_ANCHORED
+
+
+def test_extract_from_text_error_code_table_element_anchored_highest_confidence() -> None:
+    """[KG-W1.1] Table element + anchor = the heuristic replacement for the
+    old dead-code high-confidence branch, per
+    `09-kg-extraction-strategy.md` §5.4 ("elemen tabel + heading error
+    code/malfunction code terdekat")."""
+    element = _element(
+        element_type="table",
+        text="| Error code | Description |\n| P8 | Water flow error |",
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+
+
+def test_extract_from_text_error_code_pattern_unanchored_low_confidence() -> None:
+    """[KG-W1.1] No anchor keyword anywhere nearby -> lower confidence than
+    the pre-fix flat value (0.4), reflecting the empirically-confirmed high
+    false-positive rate of unanchored matches (document_id=3: 192/192
+    ErrorCode candidates were unanchored, spanning near-alphabet-wide
+    coverage inconsistent with real VRF error code allocation)."""
+    element = _element(
+        element_type="paragraph", text="The unit code is P8 for this configuration."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = [e for e in result.entities if e.entity_type == "ErrorCode"]
+    assert len(error_codes) == 1
+    assert error_codes[0].name == "P8"
+    assert error_codes[0].confidence == kg.CONFIDENCE_ERROR_CODE_UNANCHORED
+    assert error_codes[0].confidence < 0.4
 
 
 def test_extract_from_text_no_matches_returns_empty() -> None:
@@ -169,6 +388,203 @@ def test_extract_from_text_no_matches_returns_empty() -> None:
     result = kg.extract_from_text(element, "doc.pdf")
     assert result.entities == []
     assert result.relations == []
+
+
+def test_extract_from_text_component_keyword_word_boundary_rejects_substring() -> None:
+    """[KG-W1.1] Word-boundary fix: "fan motor" must NOT match inside "fan
+    motors" (the old `keyword in text_lower` substring check would have
+    incorrectly matched this)."""
+    element = _element(text="Check the fan motors and controls for wear.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    names = {e.name for e in result.entities}
+    assert "fan motor" not in names
+
+
+def test_extract_from_text_component_keyword_glossary_page_lower_confidence() -> None:
+    """[KG-W1.1] More than `COMPONENT_KEYWORD_GLOSSARY_THRESHOLD` distinct
+    keyword matches on one element (a real pattern found on document_id=3,
+    14/20 keywords matched simultaneously) is treated as a likely
+    glossary/spec-list page, at reduced confidence."""
+    element = _element(
+        text=(
+            "compressor, condenser, evaporator, expansion valve, "
+            "solenoid valve, fan motor, accumulator"
+        )
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    component_entities = [e for e in result.entities if e.entity_type == "Component"]
+    assert len(component_entities) == 7
+    assert all(e.confidence == kg.CONFIDENCE_TEXT_KEYWORD_GLOSSARY_PAGE for e in component_entities)
+
+
+def test_extract_from_text_component_keyword_below_glossary_threshold_normal_confidence() -> None:
+    element = _element(text="Check the compressor and condenser for leaks.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    component_entities = [e for e in result.entities if e.entity_type == "Component"]
+    assert len(component_entities) == 2
+    assert all(e.confidence == kg.CONFIDENCE_TEXT_KEYWORD for e in component_entities)
+
+
+def test_extract_from_text_sensor_id_space_and_dash_variants() -> None:
+    """[KG-W1.1, R-addendum] `TH 3`/`TH-3` (space/dash separator) must be
+    recognized, not just `TH3` — confirmed recall bug against document_id=3
+    real data (see vrf_vocabulary.py SENSOR_ID_PATTERN docstring)."""
+    element = _element(text="Measure resistance between TH 3 and TH-4.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"TH 3", "TH-4"}
+
+
+def test_extract_from_text_connector_id_space_and_dash_variants() -> None:
+    element = _element(text="Connectors CN 105 and CN-106 are both used.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    connector_names = {e.name for e in result.entities if e.entity_type == "Connector"}
+    assert connector_names == {"CN 105", "CN-106"}
+
+
+# ---------------------------------------------------------------------------
+# SA-KG.1 cross-vendor vocabulary union (Daikin R#T/X#M/two-letter error
+# codes, alongside the existing Mitsubishi TH#/CN#/single-letter forms)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_from_text_sensor_id_daikin() -> None:
+    element = _element(text="Check thermistor R1T and R14T for continuity.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert {"R1T", "R14T"} <= sensor_names
+    r1t = next(e for e in result.entities if e.name == "R1T")
+    assert r1t.extraction_method == kg.EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN
+    assert r1t.confidence == kg.CONFIDENCE_SENSOR_ID
+
+
+def test_extract_from_text_sensor_id_daikin_space_and_dash_variants() -> None:
+    # Separator allowed only between the letter prefix and the digits (same
+    # shape as SENSOR_ID_PATTERN/TH#) — not between the digits and the "T"
+    # suffix.
+    element = _element(text="Sensors R 3T and R-5T are both thermistors.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"R 3T", "R-5T"}
+
+
+def test_extract_from_text_sensor_id_th_and_daikin_both_matched_union() -> None:
+    """[SA-KG.1] Union, not per-vendor: both conventions tried
+    unconditionally in the same element."""
+    element = _element(text="Compare TH3 (old unit) against R3T (new unit).")
+    result = kg.extract_from_text(element, "doc.pdf")
+    sensor_names = {e.name for e in result.entities if e.entity_type == "Sensor"}
+    assert sensor_names == {"TH3", "R3T"}
+    methods = {e.extraction_method for e in result.entities if e.entity_type == "Sensor"}
+    assert methods == {
+        kg.EXTRACTION_METHOD_REGEX_SENSOR_ID,
+        kg.EXTRACTION_METHOD_REGEX_SENSOR_ID_DAIKIN,
+    }
+
+
+def test_extract_from_text_terminal_id_daikin() -> None:
+    # Deliberately avoids the literal phrase "terminal block" — that free-
+    # text keyword ALSO matches COMPONENT_KEYWORDS (entity_type "Terminal",
+    # extraction_method "dict_keyword"), which would contaminate the
+    # per-pattern assertions below. This test isolates the identifier
+    # regex path.
+    element = _element(text="Connect the wire to X1M and X2M.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    terminal_entities = [e for e in result.entities if e.entity_type == "Terminal"]
+    terminal_names = {e.name for e in terminal_entities}
+    assert terminal_names == {"X1M", "X2M"}
+    assert all(
+        e.extraction_method == kg.EXTRACTION_METHOD_REGEX_TERMINAL_ID for e in terminal_entities
+    )
+    assert all(e.confidence == kg.CONFIDENCE_TERMINAL_ID for e in terminal_entities)
+
+
+def test_extract_from_text_terminal_id_space_and_dash_variants() -> None:
+    element = _element(text="Terminals X 1M and X-2M are both used.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    terminal_names = {e.name for e in result.entities if e.entity_type == "Terminal"}
+    assert terminal_names == {"X 1M", "X-2M"}
+
+
+def test_extract_from_text_error_code_two_letter_daikin_prefix() -> None:
+    """[SA-KG.1, §11.2.1] AH/AJ/UA — the observed Daikin two-letter main
+    codes — now matched (the old single-letter+digit-only pattern missed
+    these entirely)."""
+    element = _element(
+        element_type="table",
+        text="Error code AH: dust detection sensor error. Error code UA: refrigerant type error.",
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert {"AH", "UA"} <= error_code_names
+
+
+def test_extract_from_text_error_code_two_letter_does_not_match_ac() -> None:
+    """[SA-KG.1] Deliberately conservative second-letter restriction
+    ({A,H,J}) — must NOT match "AC" (air conditioning), an extremely common
+    domain abbreviation that a fully generic [A-Z] second letter would
+    wrongly catch as a false-positive ErrorCode candidate."""
+    element = _element(
+        element_type="table", text="Error code: check the AC unit's power supply."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "AC" not in error_code_names
+
+
+def test_extract_from_text_error_code_single_letter_mitsubishi_still_works() -> None:
+    """[SA-KG.1] The original Mitsubishi single-letter+digit form must
+    still work unchanged alongside the new two-letter Daikin form."""
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "P8" in error_code_names
+
+
+def test_extract_from_text_error_code_subcode_extracted_as_separate_candidate() -> None:
+    """[SA-KG.1, §11.2.1] Dual granularity: "A6 - 01" produces BOTH a
+    main-code candidate ("A6") AND a separate main+subcode candidate
+    ("A6-01", normalized — no spaces around the dash)."""
+    element = _element(
+        element_type="table", text="Error code A6 - 01: fan motor locked, check connectors."
+    )
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_codes = {e.name: e for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "A6" in error_codes
+    assert "A6-01" in error_codes
+    assert error_codes["A6"].extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE
+    assert error_codes["A6-01"].extraction_method == kg.EXTRACTION_METHOD_REGEX_ERROR_CODE_SUBCODE
+    # same anchor/confidence tier for both granularities (table + anchor)
+    assert error_codes["A6"].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+    assert error_codes["A6-01"].confidence == kg.CONFIDENCE_ERROR_CODE_TABLE_ANCHORED
+    assert error_codes["A6"].context_anchor_matched is True
+    assert error_codes["A6-01"].context_anchor_matched is True
+
+
+def test_extract_from_text_error_code_subcode_two_letter_prefix() -> None:
+    element = _element(element_type="table", text="Error code AH - 03: dust detection error.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "AH" in error_code_names
+    assert "AH-03" in error_code_names
+
+
+def test_extract_from_text_error_code_subcode_justification_span_points_at_real_text() -> None:
+    text = "Error code A6 - 01 appears."
+    element = _element(element_type="table", text=text)
+    result = kg.extract_from_text(element, "doc.pdf")
+    subcode_entity = next(e for e in result.entities if e.name == "A6-01")
+    assert subcode_entity.justification_span is not None
+    start, end = subcode_entity.justification_span
+    assert text[start:end] == "A6 - 01"  # literal raw span, name is normalized separately
+
+
+def test_extract_from_text_error_code_no_subcode_no_subcode_candidate() -> None:
+    element = _element(element_type="table", text="Error code A6 appears with no subcode.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code_names = {e.name for e in result.entities if e.entity_type == "ErrorCode"}
+    assert "A6" in error_code_names
+    assert not any("-" in name for name in error_code_names)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +620,230 @@ def test_extract_kg_candidates_merges_text_and_vlm_sources() -> None:
     text_names = {e.name for e in results[2].entities}
     assert "TH3" in text_names
     assert "compressor" in text_names
+
+
+def test_extract_kg_candidates_default_model_family_is_none() -> None:
+    """[KG-W1.3, K2] Without an explicit `model_family` argument (the
+    orchestrator.py call site today, see module docstring wiring-gap note),
+    every candidate's `model_family` stays `None` — same as before this
+    change, no silent behavior shift for existing callers."""
+    element = _element(local_id=1, text="Check TH3 near the compressor.")
+    parse_result = DoclingParseResult(
+        elements=[element], page_confidence={1: _page_confidence(1)}, page_count=1
+    )
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf")
+    assert all(e.model_family is None for e in results[1].entities)
+
+
+def test_extract_kg_candidates_threads_model_family_onto_every_candidate() -> None:
+    """[KG-W1.3, K2] `model_family` is threaded onto every entity/relation
+    produced, regardless of source (text keyword/regex, VLM structured
+    components/connections, VLM description text)."""
+    figure_element = _element(local_id=1, element_type="figure", text=None, page_number=1)
+    text_element = _element(
+        local_id=2, element_type="paragraph", text="Check TH3 near the compressor.", page_number=1
+    )
+    parse_result = DoclingParseResult(
+        elements=[figure_element, text_element],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Uses a solenoid valve.",
+            components=["fan motor"],
+            connections=["fan motor -> TH3"],
+        ),
+    )
+
+    results = kg.extract_kg_candidates(
+        parse_result, "doc.pdf", cascade_results=[cascade_result], model_family="VRV-IV"
+    )
+
+    for candidates in results.values():
+        assert all(e.model_family == "VRV-IV" for e in candidates.entities)
+        assert all(r.model_family == "VRV-IV" for r in candidates.relations)
+    # sanity: this really did exercise all three sources (VLM structured,
+    # VLM description text, and plain text matchers), not a vacuous pass
+    assert len(results[1].entities) == 2  # "fan motor" (component) + "solenoid valve" (description)
+    assert len(results[1].relations) == 1  # fan motor -> TH3
+    assert len(results[2].entities) == 2  # TH3 + compressor
+
+
+# ---------------------------------------------------------------------------
+# cross-source agreement (KG-W1.7, R3)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_cross_source_agreement_marks_opposite_mechanism_matches() -> None:
+    vlm_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="Compressor",  # different case — key comparison is case-insensitive
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is True
+    assert vlm_entity.corroboration_count == 1
+    assert text_entity.cross_source_corroborated is True
+    assert text_entity.corroboration_count == 1
+
+
+def test_apply_cross_source_agreement_same_mechanism_does_not_corroborate() -> None:
+    """[KG-W1.7, R3] Two text-path matches for the same entity on the same
+    page are NOT independent evidence of each other."""
+    entity_a = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entity_b = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [entity_a, entity_b]
+    kg._apply_cross_source_agreement(entities)
+
+    assert entity_a.cross_source_corroborated is False
+    assert entity_a.corroboration_count == 0
+    assert entity_b.cross_source_corroborated is False
+    assert entity_b.corroboration_count == 0
+
+
+def test_apply_cross_source_agreement_different_pages_do_not_corroborate() -> None:
+    """[KG-W1.7, R3] Agreement is scoped to the SAME evidence (same page) —
+    NOT the multigraph-merge-across-pages behavior §5.2 explicitly forbids
+    for relations (and which this module never does for entities either)."""
+    vlm_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="compressor",
+        entity_type="Component",
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=99,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_DICT_KEYWORD,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is False
+    assert text_entity.cross_source_corroborated is False
+
+
+def test_apply_cross_source_agreement_different_entity_type_does_not_corroborate() -> None:
+    vlm_entity = kg.KGCandidateEntity(
+        name="TH3",
+        entity_type="Sensor",
+        confidence=0.6,
+        source_document="doc.pdf",
+        page=5,
+        element_id=1,
+        extraction_method=kg.EXTRACTION_METHOD_REGEX_SENSOR_ID + "_vlm_description",
+    )
+    text_entity = kg.KGCandidateEntity(
+        name="TH3",
+        entity_type="Connector",  # different entity_type -> different key
+        confidence=0.5,
+        source_document="doc.pdf",
+        page=5,
+        element_id=2,
+        extraction_method=kg.EXTRACTION_METHOD_REGEX_CONNECTOR_ID,
+    )
+    entities = [vlm_entity, text_entity]
+    kg._apply_cross_source_agreement(entities)
+
+    assert vlm_entity.cross_source_corroborated is False
+    assert text_entity.cross_source_corroborated is False
+
+
+def test_extract_kg_candidates_applies_cross_source_agreement_end_to_end() -> None:
+    """[KG-W1.7, R3] End-to-end via `extract_kg_candidates`: a figure's VLM
+    `description` text and a nearby paragraph's plain text both mention
+    "compressor" on the same page — real, working avenue on current data
+    per module docstring (structured `components[]` is still always empty
+    in practice)."""
+    figure_element = _element(local_id=1, element_type="figure", text=None, page_number=7)
+    text_element = _element(
+        local_id=2, element_type="paragraph", text="Check the compressor for leaks.", page_number=7
+    )
+    parse_result = DoclingParseResult(
+        elements=[figure_element, text_element],
+        page_confidence={7: _page_confidence(7)},
+        page_count=7,
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=7, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description="Schematic showing the compressor.", components=[], connections=[]
+        ),
+    )
+
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf", cascade_results=[cascade_result])
+
+    vlm_compressor = next(e for e in results[1].entities if e.name == "compressor")
+    text_compressor = next(e for e in results[2].entities if e.name == "compressor")
+    assert vlm_compressor.cross_source_corroborated is True
+    assert text_compressor.cross_source_corroborated is True
+    assert vlm_compressor.corroboration_count == 1
+    assert text_compressor.corroboration_count == 1
+
+
+def test_extract_kg_candidates_relations_not_corroborated_by_this_branch() -> None:
+    """[KG-W1.7, R3] Relations stay at their KG-W1.4 defaults — no second,
+    independent relation-extraction mechanism exists to agree with the
+    VLM-only one yet (see module docstring)."""
+    element = _element(local_id=1, element_type="figure", page_number=1)
+    parse_result = DoclingParseResult(
+        elements=[element], page_confidence={1: _page_confidence(1)}, page_count=1
+    )
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=1, element_local_id=1, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description=None, components=[], connections=["compressor -> TH3"]
+        ),
+    )
+    results = kg.extract_kg_candidates(parse_result, "doc.pdf", cascade_results=[cascade_result])
+    assert results[1].relations[0].cross_source_corroborated is False
+    assert results[1].relations[0].corroboration_count == 0
 
 
 def test_extract_kg_candidates_omits_elements_with_no_candidates() -> None:
@@ -249,6 +889,8 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
         source_document="doc.pdf",
         page=1,
         element_id=1,
+        extraction_method="dict_keyword",
+        justification_span=[6, 16],
     )
     relation = kg.KGCandidateRelation(
         subject="compressor",
@@ -258,6 +900,7 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
         source_document="doc.pdf",
         page=1,
         element_id=1,
+        extraction_method="vlm_connection",
     )
 
     entity_dicts = kg.entities_to_jsonb([entity])
@@ -271,6 +914,13 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "source_document": "doc.pdf",
             "page": 1,
             "element_id": 1,
+            "extraction_method": "dict_keyword",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": [6, 16],
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
         }
     ]
     assert relation_dicts == [
@@ -282,5 +932,13 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "source_document": "doc.pdf",
             "page": 1,
             "element_id": 1,
+            "extraction_method": "vlm_connection",
+            "canonical_name": None,
+            "model_family": None,
+            "justification_span": None,
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
+            "type_constraint_violated": None,
         }
     ]

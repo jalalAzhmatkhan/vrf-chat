@@ -310,3 +310,41 @@ def test_no_evidence_warning_severity_is_note() -> None:
 def test_warning_import_used() -> None:
     # Sanity: Warning is re-exported/usable from this module's imports.
     assert Warning(message="x").severity == "note"
+
+
+# ---------------------------------------------------------------------------
+# log_confidence_anomaly_if_needed — F2-09, §5.0
+# ---------------------------------------------------------------------------
+
+
+def test_log_confidence_anomaly_logged_when_zero_and_not_refused(caplog) -> None:
+    answer = TechnicalAnswer(answer="Looks fine.", confidence=0.0, refused=False)
+
+    with caplog.at_level("WARNING"):
+        pp.log_confidence_anomaly_if_needed(answer)
+
+    assert any(
+        r.message == "agent.answer.confidence_zero_not_refused_anomaly" for r in caplog.records
+    )
+
+
+def test_log_confidence_anomaly_not_logged_when_refused(caplog) -> None:
+    answer = TechnicalAnswer(answer="", confidence=0.0, refused=True)
+
+    with caplog.at_level("WARNING"):
+        pp.log_confidence_anomaly_if_needed(answer)
+
+    assert not any(
+        r.message == "agent.answer.confidence_zero_not_refused_anomaly" for r in caplog.records
+    )
+
+
+def test_log_confidence_anomaly_not_logged_when_confidence_nonzero(caplog) -> None:
+    answer = TechnicalAnswer(answer="Grounded.", confidence=0.8, refused=False)
+
+    with caplog.at_level("WARNING"):
+        pp.log_confidence_anomaly_if_needed(answer)
+
+    assert not any(
+        r.message == "agent.answer.confidence_zero_not_refused_anomaly" for r in caplog.records
+    )

@@ -24,6 +24,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request, Security
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pydantic_ai.usage import UsageLimits
 from sqlalchemy.orm import Session
 
 from app.agent.schemas import TechnicalAnswer
@@ -59,7 +60,16 @@ def _build_agent_deps(
         default_top_k=settings.RETRIEVAL_DEFAULT_TOP_K,
         circuit_breaker_seconds=settings.RETRIEVAL_CIRCUIT_BREAKER_SECONDS,
         known_entities=known_entities,
+        max_chunk_chars=settings.CONTEXT_BUILDER_MAX_CHUNK_CHARS,  # F2-07
     )
+
+
+def _build_usage_limits(settings: Settings) -> UsageLimits:
+    """F2-06 — wires `Settings.CHAT_LLM_MAX_REQUESTS_PER_TURN` into the
+    per-turn round-trip cap (`app/agent/vrf_agent.py`/`app/agent/streaming.py`
+    otherwise fall back to a hardcoded default of their own if this is never
+    called)."""
+    return UsageLimits(request_limit=settings.CHAT_LLM_MAX_REQUESTS_PER_TURN)
 
 
 @router.post("", response_model=TechnicalAnswer)
@@ -79,6 +89,7 @@ async def chat(
         chat_request.message,
         model=chat_request.model_override,
         timeout_seconds=settings.CHAT_LLM_TIMEOUT_SECONDS,
+        usage_limits=_build_usage_limits(settings),
     )
     return result.answer
 
@@ -98,5 +109,6 @@ async def chat_stream(
         chat_request.message,
         model=chat_request.model_override,
         timeout_seconds=settings.CHAT_LLM_TIMEOUT_SECONDS,
+        usage_limits=_build_usage_limits(settings),
     )
     return StreamingResponse(generator, media_type="text/event-stream")

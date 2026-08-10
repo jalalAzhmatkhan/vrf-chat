@@ -251,3 +251,22 @@ def enforce_never_invent_safety_net(
             update={"refused": True, "warnings": [*answer.warnings, NO_EVIDENCE_WARNING]}
         )
     return answer
+
+
+def log_confidence_anomaly_if_needed(answer: TechnicalAnswer) -> None:
+    """F2-09 (§5.0, `05-streaming-and-api-contract.md`) — **wajib**: sebelum
+    `done` dikirim (or the equivalent non-streaming return), if
+    `confidence == 0.0` **and** `refused == False`, log it as an
+    observability anomaly (warning level, never blocks/mutates the answer).
+    Not a perfect disambiguator (a model can legitimately score confidence
+    0.0 for an answer it still chooses to show), but §5.0's own reasoning
+    stands: that specific combination is inherently suspicious in a "never
+    invent" domain, and is cheap to flag. Call this AFTER both deterministic
+    gates above have run, on the final answer that is actually about to be
+    sent to the user — never on an intermediate/pre-gate value.
+    """
+    if answer.confidence == 0.0 and not answer.refused:
+        logger.warning(
+            "agent.answer.confidence_zero_not_refused_anomaly",
+            extra={"answer_length": len(answer.answer)},
+        )

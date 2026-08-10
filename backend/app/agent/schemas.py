@@ -27,13 +27,29 @@ VISUAL_ELEMENT_TYPES = frozenset({"icon", "figure", "diagram"})
 
 
 class Citation(BaseModel):
-    document_id: str
-    page: int
-    element_id: str
+    # [F2-01] Defaults on every field below (not just a bound constraint) —
+    # the exact same reasoning as `TechnicalAnswer.confidence`'s default
+    # (see that field's docstring): `citations` is a `list[Citation]`
+    # nested inside the top-level streamed object, and pydantic_ai's
+    # partial-streaming validation applies just as much to a partially-
+    # formed *list item* as to the top-level object. Confirmed in real QA
+    # testing (`Documentation/qa-reports/phase-2-qa-report.md` F2-01): a
+    # model that emitted `citations[0]` without `element_type` yet (still
+    # mid-stream) raised `UnexpectedModelBehavior` and aborted the ENTIRE
+    # turn — text that had already streamed correctly was discarded too.
+    # These defaults do not weaken F2-02's citation-validation gate
+    # (`app/agent/answer_postprocess.py`): a citation left at these
+    # placeholder values has an `element_id` of `""`, which never resolves
+    # to a real context element, so it is dropped there regardless of
+    # whether the model supplied that placeholder or genuinely omitted the
+    # field.
+    document_id: str = ""
+    page: int = 0
+    element_id: str = ""
     # "icon"|"figure"|"diagram"|"table"|"paragraph"|"procedure"|"entity"|...
     # — same value space as elements.element_type/chunks.chunk_type
     # (02-ingestion-pipeline.md §5).
-    element_type: str
+    element_type: str = ""
     quote: str | None = None
     # Populated only when element_type in VISUAL_ELEMENT_TYPES (§5.2).
     image_uri: str | None = None

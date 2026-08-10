@@ -141,6 +141,14 @@ class Settings(BaseSettings):
     LOGIN_RATE_LIMIT_MAX_ATTEMPTS: int = 5
     LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = 900
 
+    # ---- Ingestion Stage 1 — native PDF probe (PyMuPDF), see
+    # Documentation/system-design/02-ingestion-pipeline.md §3 and
+    # app/ingestion/native_probe.py. Starting-point heuristics, calibrated by
+    # I1.6 benchmark (backend/docs/i1.6-vram-benchmark-report.md). ----
+    NATIVE_PROBE_MIN_TEXT_CHARS: int = 40
+    NATIVE_PROBE_VECTOR_DRAWING_THRESHOLD: int = 50
+    NATIVE_PROBE_TEXT_DENSITY_MIN: float = 0.0005
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def _split_allowed_origins(cls, value: object) -> object:

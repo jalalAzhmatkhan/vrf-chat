@@ -128,6 +128,50 @@ class FastEmbedSparseModel:
         ]
 
 
+def delete_chunks_by_document(client: QdrantClient, collection: str, document_id: int) -> None:
+    """Scoped delete of every Qdrant point belonging to `document_id` in
+    `collection` — a document-scoped `FilterSelector` delete, NOT a full
+    collection drop.
+
+    **[2026-08-10, operational-habit correction]** Added after a real
+    incident during SA1.2 bugfix re-verification: re-ingesting a document
+    after a bugfix (`app/ingestion/chunker.py` `store_chunks` deletes and
+    recreates ALL of that document's `chunks` rows, which get fresh
+    auto-increment ids) previously left the OLD Qdrant points — upserted
+    under the old chunk ids — permanently orphaned, since nothing ever
+    deleted them (`embed_and_upsert_chunks` only ever upserts `pending`
+    chunks, never proactively cleans stale ones). The ad hoc fix used during
+    that incident was a full `DELETE /collections/<name>` (drop the ENTIRE
+    collection) — harmless that one time only because document_id=3 was the
+    only document ingested so far in Fase 1, but a real risk of destroying
+    every OTHER document's vectors once multiple documents coexist in the
+    same collection. This function (called from
+    `app/ingestion/orchestrator.py` `_run_embedding`, right before
+    `embed_and_upsert_chunks`, on every ingestion run — a no-op if nothing
+    matches, so harmless for a first-time ingest) makes document-scoped
+    cleanup the structural default instead of a manual escape hatch.
+
+    Deliberately duplicates the same filter-building logic as
+    `app/retrieval/vector_store.py` `QdrantVectorStoreClient.delete_by_document`
+    rather than depending on it — this module already calls
+    `qdrant_client.QdrantClient` directly (see module docstring "hybrid
+    stays Qdrant-native"), so reusing that Protocol-wrapped class here would
+    cross a module boundary this file intentionally does not cross
+    elsewhere."""
+    client.delete(
+        collection_name=collection,
+        points_selector=qmodels.FilterSelector(
+            filter=qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="document_id", match=qmodels.MatchValue(value=document_id)
+                    )
+                ]
+            )
+        ),
+    )
+
+
 def ensure_collection(client: QdrantClient, collection: str, dense_dim: int) -> None:
     """Idempotent collection creation — safe to call on every ingestion run."""
     if client.collection_exists(collection):

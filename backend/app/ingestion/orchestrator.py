@@ -52,6 +52,7 @@ from app.ingestion.embedder import (
     FastEmbedDenseModel,
     FastEmbedSparseModel,
     SparseEmbeddingModel,
+    delete_chunks_by_document,
     embed_and_upsert_chunks,
     ensure_collection,
 )
@@ -219,6 +220,15 @@ def run_ingestion_pipeline(
             ensure_collection(
                 client, settings.VECTOR_STORE_COLLECTION, settings.VECTOR_STORE_DENSE_DIM
             )
+            # [2026-08-10, operational-habit correction — see
+            # app/ingestion/embedder.py delete_chunks_by_document docstring]
+            # `store_chunks` (STAGE_CHUNKING above) always deletes+recreates
+            # this document's `chunks` rows with fresh ids on every
+            # ingestion run (e.g. a re-ingest after a bugfix) — without this
+            # scoped cleanup, the OLD Qdrant points (upserted under the OLD
+            # chunk ids) would be silently orphaned forever. A no-op, safe
+            # to call unconditionally, on a first-time ingest.
+            delete_chunks_by_document(client, settings.VECTOR_STORE_COLLECTION, document_id)
             dense = dense_model or FastEmbedDenseModel(settings.EMBEDDER_DENSE_MODEL)
             sparse = sparse_model or FastEmbedSparseModel(settings.EMBEDDER_SPARSE_MODEL)
             return embed_and_upsert_chunks(

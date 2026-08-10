@@ -117,6 +117,7 @@ class FakeQdrantClient:
         self._exists = False
         self.create_calls: list[dict[str, Any]] = []
         self.upsert_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
 
     def collection_exists(self, collection: str) -> bool:
         return self._exists
@@ -127,6 +128,11 @@ class FakeQdrantClient:
 
     def upsert(self, collection_name: str, points: Any) -> None:
         self.upsert_calls.append({"collection_name": collection_name, "points": points})
+
+    def delete(self, collection_name: str, points_selector: Any) -> None:
+        self.delete_calls.append(
+            {"collection_name": collection_name, "points_selector": points_selector}
+        )
 
 
 class FakeDenseModel:
@@ -352,6 +358,17 @@ def test_run_ingestion_pipeline_full_success(pipeline_env: dict[str, Any]) -> No
 
     # Table's markdown was corrected via the (faked) cascade result.
     assert pipeline_env["qdrant_client"].upsert_calls  # embedding actually ran
+
+    # [2026-08-10 operational-habit correction] Every embedding run does a
+    # document-scoped Qdrant cleanup FIRST (a no-op here, first-time
+    # ingest) — never a full collection drop. See
+    # app/ingestion/embedder.py delete_chunks_by_document docstring.
+    assert len(pipeline_env["qdrant_client"].delete_calls) == 1
+    delete_call = pipeline_env["qdrant_client"].delete_calls[0]
+    assert delete_call["collection_name"] == "vrf_chunks"
+    selector = delete_call["points_selector"]
+    assert selector.filter.must[0].key == "document_id"
+    assert selector.filter.must[0].match.value == pipeline_env["document"].id
 
 
 def test_run_ingestion_pipeline_document_not_found_raises() -> None:

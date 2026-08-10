@@ -166,6 +166,51 @@ Three new fields, two populated now, one deliberately not:
   valid for its predicate needs the "Predicate 360" domain/range ontology
   (`KG-W2.3`, Wave 2), which doesn't exist yet. Adding the field now (cheap,
   jsonb) avoids a second schema-shape churn later.
+
+**[KG-W1.7, 2026-08-10 — R3 cross-source agreement]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §5.2/§6.2 R3.
+`extract_kg_candidates` now populates the `cross_source_corroborated`/
+`corroboration_count` fields `KG-W1.4` added, via `_apply_cross_source_agreement`
+run once over ALL entities produced for a document (not per-element) after
+the main per-element extraction loop:
+
+- **What counts as "the same evidence"**: entities on the SAME page
+  (`entity.page`) — this subsumes "same `element_id`" (a strictly narrower
+  case: an element's own page trivially includes itself), so grouping by
+  page alone satisfies "element_id sama ATAU halaman sama" from the design
+  doc without needing two separate code paths.
+- **What counts as "the same entity"**: `_entity_agreement_key` —
+  `(entity_type, name.strip().lower())`. This is a coarse, deliberately
+  cheap comparison for cross-source agreement ONLY — it is NOT real
+  canonicalization (that remains `KG-W2.1`/R6, Wave 2) and MUST NOT be
+  reused as if it were one (e.g. it would wrongly treat "TH3" found via
+  regex and "th3" found via a hypothetical future VLM output as the same
+  key, which is fine for a confidence *signal* but not precise enough for
+  identity merging).
+- **What counts as "independent mechanisms agreeing"**: `_is_vlm_sourced`
+  classifies each candidate's `extraction_method` as VLM-path or text-path.
+  Only OPPOSITE-mechanism matches on the same page count as corroboration —
+  two `dict_keyword` matches for "compressor" from two different paragraphs
+  on the same page do NOT corroborate each other (same mechanism, not
+  independent evidence); a `dict_keyword` match and a
+  `dict_keyword_vlm_description` match for "compressor" on the same page DO
+  (this is precisely the real, working avenue on current data — see
+  `KG-W1.1` module docstring finding #2: VLM `components[]`/`connections[]`
+  are still always empty in practice, so `vlm_component`/`vlm_connection`
+  essentially never fire today, but the `*_vlm_description` methods DO).
+- **Relations are explicitly NOT covered by this branch, and this is a
+  deliberate choice, not an oversight**: cross-source agreement for
+  relations would need a second, INDEPENDENT relation-extraction mechanism
+  to agree with the existing VLM-only one (`extract_from_visual_description`
+  is still the only source of `KGCandidateRelation`s — `extract_from_text`
+  extracts no relations at all). Writing agreement-detection code for
+  relations now would be provably unreachable on any real input (nothing to
+  agree with), i.e. exactly the kind of dead-code trap `KG-W1.1` found and
+  fixed — `KGCandidateRelation.cross_source_corroborated`/
+  `corroboration_count` stay at their `KG-W1.4` defaults (`False`/`0`) for
+  now. Revisit once a second relation-extraction mechanism exists (e.g.
+  `KG-W2.4`/R8's GLiREL-based typing), reusing the same page+key pattern
+  above.
 """
 
 from __future__ import annotations
@@ -555,6 +600,52 @@ def extract_from_text(
     return result
 
 
+def _is_vlm_sourced(extraction_method: str) -> bool:
+    """**[KG-W1.7, R3]** True if `extraction_method` indicates the VLM path
+    (Stage 4 `visual_description` — structured `components[]`/`connections[]`
+    OR free-text `description`) rather than Docling-native `element.text`.
+    See `EXTRACTION_METHOD_*`/`_VLM_DESCRIPTION_SUFFIX` above."""
+    return extraction_method.startswith("vlm_") or extraction_method.endswith(
+        _VLM_DESCRIPTION_SUFFIX
+    )
+
+
+def _entity_agreement_key(entity: KGCandidateEntity) -> tuple[str, str]:
+    """**[KG-W1.7, R3]** Coarse "same entity" comparison key used ONLY for
+    cross-source agreement — see module docstring for why this is
+    deliberately not real canonicalization."""
+    return (entity.entity_type, entity.name.strip().lower())
+
+
+def _apply_cross_source_agreement(all_entities: list[KGCandidateEntity]) -> None:
+    """**[KG-W1.7, R3]** Mutates `cross_source_corroborated`/
+    `corroboration_count` on `all_entities` in place — see module docstring
+    for the full rationale (page-level grouping, coarse key, opposite-
+    mechanism-only counting)."""
+    by_page: dict[int, list[KGCandidateEntity]] = {}
+    for entity in all_entities:
+        by_page.setdefault(entity.page, []).append(entity)
+
+    for page_entities in by_page.values():
+        vlm_key_counts: dict[tuple[str, str], int] = {}
+        text_key_counts: dict[tuple[str, str], int] = {}
+        for entity in page_entities:
+            key = _entity_agreement_key(entity)
+            is_vlm = _is_vlm_sourced(entity.extraction_method)
+            bucket = vlm_key_counts if is_vlm else text_key_counts
+            bucket[key] = bucket.get(key, 0) + 1
+
+        for entity in page_entities:
+            key = _entity_agreement_key(entity)
+            opposite_bucket = (
+                text_key_counts if _is_vlm_sourced(entity.extraction_method) else vlm_key_counts
+            )
+            opposite_count = opposite_bucket.get(key, 0)
+            if opposite_count > 0:
+                entity.cross_source_corroborated = True
+                entity.corroboration_count = opposite_count
+
+
 def extract_kg_candidates(
     parse_result: DoclingParseResult,
     document_ref: str,
@@ -572,7 +663,14 @@ def extract_kg_candidates(
     `KGCandidateRelation.model_family` unchanged, forming (together with
     `entity_type` and the eventual `canonical_name`) the composite canonical
     key decided in `09-kg-extraction-strategy.md` §5.1. See module docstring
-    for which caller is expected to actually pass this today."""
+    for which caller is expected to actually pass this today.
+
+    **[KG-W1.7, R3]** After every element's candidates are collected, a
+    second pass (`_apply_cross_source_agreement`) runs over ALL entities
+    produced for this document (not per-element — cross-source agreement is
+    a page-level, cross-element comparison) to populate
+    `cross_source_corroborated`/`corroboration_count`. See module docstring
+    for the full rationale, including why relations are NOT covered."""
     cascade_by_local_id = {
         r.task.element_local_id: r
         for r in (cascade_results or [])
@@ -597,6 +695,9 @@ def extract_kg_candidates(
 
         if candidates.entities or candidates.relations:
             results[element.local_id] = candidates
+
+    all_entities = [entity for candidates in results.values() for entity in candidates.entities]
+    _apply_cross_source_agreement(all_entities)
 
     return results
 

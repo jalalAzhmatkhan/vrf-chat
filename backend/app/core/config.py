@@ -242,6 +242,15 @@ class Settings(BaseSettings):
     VECTOR_STORE_MILVUS_URI: str = "http://localhost:19530"
     VECTOR_STORE_MILVUS_TOKEN: str | None = None
 
+    # ---- Retrieval (C2.1), see
+    # Documentation/system-design/03-retrieval-chunking.md §6 and
+    # app/retrieval/hybrid_search.py. Circuit breaker per
+    # 05-streaming-and-api-contract.md §3 point 5: if the Qdrant hybrid query
+    # exceeds this budget, `search_documents` returns a best-effort empty
+    # result instead of blocking the rest of the TTFT budget. ----
+    RETRIEVAL_CIRCUIT_BREAKER_SECONDS: float = 8.0
+    RETRIEVAL_DEFAULT_TOP_K: int = 20
+
     # ---- Ingestion Stage: chunk embedding (I1.8), see
     # Documentation/system-design/03-retrieval-chunking.md §6. fastembed
     # (ONNX runtime, CPU-friendly — no GPU/VRAM contention with Docling/

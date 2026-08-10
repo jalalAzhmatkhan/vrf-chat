@@ -223,6 +223,68 @@ def test_extract_from_text_error_code_extraction_method() -> None:
     assert error_code.justification_span is not None
 
 
+def test_extract_from_text_error_code_context_anchor_matched_true_when_anchored() -> None:
+    """[KG-W1.4, K4] `context_anchor_matched` exposes the exact boolean that
+    already determined the confidence tier (KG-W1.1) — not just implicit in
+    the confidence value."""
+    element = _element(text="If error code P8 appears, check the water flow sensor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.context_anchor_matched is True
+
+
+def test_extract_from_text_error_code_context_anchor_matched_false_when_unanchored() -> None:
+    element = _element(text="The unit code is P8 for this configuration.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    error_code = next(e for e in result.entities if e.entity_type == "ErrorCode")
+    assert error_code.context_anchor_matched is False
+
+
+def test_extract_from_text_non_error_code_entities_context_anchor_matched_none() -> None:
+    """[KG-W1.4, K4] `context_anchor_matched` is only meaningful for
+    `ErrorCode` (the one low-precision pattern) — `None`, not `False`, for
+    Sensor/Connector/Component candidates (there's no anchor concept to
+    report for them, this isn't "unset")."""
+    element = _element(text="Measure TH3 near the compressor, connected via CN105.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    assert result.entities  # sanity: matchers did fire
+    for entity in result.entities:
+        assert entity.entity_type != "ErrorCode"
+        assert entity.context_anchor_matched is None
+
+
+def test_extract_from_text_cross_source_fields_default_unpopulated() -> None:
+    """[KG-W1.4, K4] cross_source_corroborated/corroboration_count are added
+    by this branch but NOT populated (that's KG-W1.7/R3) — every candidate
+    from this module defaults to `False`/`0`."""
+    element = _element(text="Check TH3 near the compressor.")
+    result = kg.extract_from_text(element, "doc.pdf")
+    assert result.entities
+    for entity in result.entities:
+        assert entity.cross_source_corroborated is False
+        assert entity.corroboration_count == 0
+
+
+def test_extract_from_visual_description_relation_type_constraint_violated_default_none() -> None:
+    """[KG-W1.4, K4] type_constraint_violated (KGCandidateRelation only) is a
+    placeholder — always None until KG-W2.3 (R9)."""
+    element = _element(local_id=5, element_type="figure", page_number=3)
+    cascade_result = CascadeResult(
+        task=CascadeTask(
+            task_type=TASK_VISUAL_DESCRIPTION, page_number=3, element_local_id=5, reason="x"
+        ),
+        visual_description=VisualDescription(
+            description=None, components=[], connections=["compressor -> TH3"]
+        ),
+    )
+    result = kg.extract_from_visual_description(element, cascade_result, "doc.pdf")
+    assert len(result.relations) == 1
+    assert result.relations[0].type_constraint_violated is None
+    assert result.relations[0].context_anchor_matched is None
+    assert result.relations[0].cross_source_corroborated is False
+    assert result.relations[0].corroboration_count == 0
+
+
 def test_extract_from_visual_description_description_entities_use_vlm_suffix_and_no_span() -> None:
     """[KG-W1.2, K1] Entities extracted from `visual_description.description`
     (not `element.text`) get an `extraction_method` suffix distinguishing the
@@ -538,6 +600,9 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "canonical_name": None,
             "model_family": None,
             "justification_span": [6, 16],
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
         }
     ]
     assert relation_dicts == [
@@ -553,5 +618,9 @@ def test_entities_to_jsonb_and_relations_to_jsonb() -> None:
             "canonical_name": None,
             "model_family": None,
             "justification_span": None,
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
+            "type_constraint_violated": None,
         }
     ]

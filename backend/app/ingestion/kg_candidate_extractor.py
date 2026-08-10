@@ -138,6 +138,34 @@ independent of `orchestrator.py`) is the intended near-term caller that
 DOES pass `model_family` — see that module for where the join actually
 happens. Reported to System Analyst/coordinator as a follow-up so
 `orchestrator.py`'s one-line gap isn't forgotten (see STATUS REPORT).
+
+**[KG-W1.4, 2026-08-10 — K4 confidence signal fields]** See
+`Documentation/system-design/09-kg-extraction-strategy.md` §6.1 K4/§9.1.
+Three new fields, two populated now, one deliberately not:
+
+- `context_anchor_matched` (`bool | None`) — **populated now.** Only
+  meaningful for the one "low-precision pattern" this module has today,
+  `ERROR_CODE_PATTERN` (see `_has_error_code_anchor`, already computed
+  since `KG-W1.1`) — every `ErrorCode` candidate now carries the exact
+  anchor boolean that determined its confidence tier, instead of that
+  signal being implicit in the confidence value alone. `None` for every
+  other entity type (`Sensor`/`Connector`/`Component`/`PCB`/`Terminal`) —
+  they don't have an anchor concept to report, this is *not* "unset,
+  populate later".
+- `cross_source_corroborated` (`bool`, default `False`) /
+  `corroboration_count` (`int`, default `0`) — **fields added here, NOT
+  populated by this branch.** Computing these requires comparing candidates
+  extracted via the VLM path against candidates extracted via the text path
+  for the SAME evidence (`element_id`/page) — that cross-source comparison
+  logic is `KG-W1.7` (R3), the next branch in this chain, which depends on
+  this one specifically for these two fields to exist first.
+- `type_constraint_violated` (`bool | None`, `KGCandidateRelation` only) —
+  **placeholder, always `None`.** Per the roadmap: "ditambahkan sebagai
+  placeholder null-default sekarang (murah); logic pengisiannya menunggu
+  KG-W2.3 (R9)" — deciding whether a relation's subject/object types are
+  valid for its predicate needs the "Predicate 360" domain/range ontology
+  (`KG-W2.3`, Wave 2), which doesn't exist yet. Adding the field now (cheap,
+  jsonb) avoids a second schema-shape churn later.
 """
 
 from __future__ import annotations
@@ -245,6 +273,13 @@ class KGCandidateEntity:
     canonical_name: str | None = None
     model_family: str | None = None
     justification_span: list[int] | None = None
+    # **[KG-W1.4, K4]** See module docstring — `context_anchor_matched` is
+    # populated now (only meaningful for `ErrorCode` candidates today);
+    # `cross_source_corroborated`/`corroboration_count` are added here but
+    # populated by `KG-W1.7` (R3), not this branch.
+    context_anchor_matched: bool | None = None
+    cross_source_corroborated: bool = False
+    corroboration_count: int = 0
 
 
 @dataclass(slots=True)
@@ -262,6 +297,16 @@ class KGCandidateRelation:
     canonical_name: str | None = None
     model_family: str | None = None
     justification_span: list[int] | None = None
+    # **[KG-W1.4, K4]** `context_anchor_matched` kept for schema symmetry
+    # with `KGCandidateEntity` (same precedent as `canonical_name` in K1) —
+    # always `None` here, no relation-side anchor pattern exists today.
+    # `cross_source_corroborated`/`corroboration_count`: see
+    # `KGCandidateEntity` docstring above, populated by `KG-W1.7`.
+    # `type_constraint_violated`: placeholder, populated by `KG-W2.3` (R9).
+    context_anchor_matched: bool | None = None
+    cross_source_corroborated: bool = False
+    corroboration_count: int = 0
+    type_constraint_violated: bool | None = None
 
 
 @dataclass(slots=True)
@@ -411,6 +456,11 @@ def _extract_entities_from_text(
                     extraction_method=EXTRACTION_METHOD_REGEX_ERROR_CODE + method_suffix,
                     justification_span=_justification_span(match, compute=compute_span),
                     model_family=model_family,
+                    # **[KG-W1.4, K4]** `ERROR_CODE_PATTERN` is the one
+                    # "low-precision pattern" this module has today — expose
+                    # the exact anchor signal that already determined
+                    # `error_code_confidence`, not just its downstream effect.
+                    context_anchor_matched=anchor_matched,
                 )
             )
 

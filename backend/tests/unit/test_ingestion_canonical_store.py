@@ -532,6 +532,9 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "canonical_name": None,
             "model_family": None,
             "justification_span": None,
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
         }
     ]
     assert element.kg_candidate_relations == [
@@ -547,6 +550,10 @@ def test_store_pages_and_elements_applies_kg_candidates(tmp_path: Path) -> None:
             "canonical_name": None,
             "model_family": None,
             "justification_span": None,
+            "context_anchor_matched": None,
+            "cross_source_corroborated": False,
+            "corroboration_count": 0,
+            "type_constraint_violated": None,
         }
     ]
 

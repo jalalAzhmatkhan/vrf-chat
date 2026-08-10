@@ -7,11 +7,14 @@ post-processing/the safety net — never the raw pre-validation answer).
 
 from __future__ import annotations
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.orm import Mapped, Session
 
 from app.agent.schemas import TechnicalAnswer
 from app.core.observability import get_logger
 from app.db.models.conversations import Citation, Conversation, Message
+from app.db.models.documents import Document
+from app.db.models.elements import Element
 
 logger = get_logger(__name__)
 
@@ -72,6 +75,12 @@ def _safe_int(value: str) -> int | None:
         return None
 
 
+def _existing_ids(db: Session, id_column: Mapped[int], ids: set[int]) -> set[int]:
+    if not ids:
+        return set()
+    return set(db.execute(select(id_column).where(id_column.in_(ids))).scalars().all())
+
+
 def persist_assistant_message(
     db: Session,
     conversation_id: int,
@@ -85,10 +94,28 @@ def persist_assistant_message(
     """Persists the assistant's turn (`messages` row, `structured_answer`
     = the full `TechnicalAnswer`, per `06-data-schema.md` §1) plus one
     `citations` row per `answer.citations` entry, `rank` = 1-indexed
-    position in that list. A citation whose `document_id` doesn't parse as
-    an int (should never happen — this backend always generates it from a
-    real integer `documents.id`, defensive only) is skipped with a warning
-    rather than aborting the whole message persist.
+    position in that list.
+
+    **F2-08** (`Documentation/qa-reports/phase-2-qa-report.md`): both
+    `citations.document_id` (`NOT NULL` FK to `documents.id`) and
+    `citations.element_id` (nullable FK to `elements.id`) are verified to
+    reference a row that actually exists **before** any `Citation` row is
+    added to the session — QA observed an unguarded `IntegrityError` here
+    (`element_id` pointing at a since-deleted/nonexistent element) crash
+    `POST /api/v1/chat` with a bare HTTP 500, and silently break the SSE
+    generator mid-stream on `POST /api/v1/chat/stream` (this function is
+    called from `stream_turn`'s `on_done` hook, *inside* the generator,
+    before `done` is yielded). F2-02 (citation validation against this
+    turn's retrieval whitelist) already eliminates most real-world cases —
+    every citation that reaches here should already reference a row F2-02
+    itself just read from these same tables — but this is a second,
+    independent layer of defense at the persistence boundary, per QA's
+    explicit request, not a replacement for F2-02. A citation with a
+    missing/nonexistent `document_id` is skipped entirely (that FK is
+    required, not nullable); one with a missing/nonexistent `element_id`
+    is still persisted, just with `element_id=None` (matches the column's
+    own `ondelete="SET NULL"` semantics — the citation's document/page/quote
+    are still meaningful without a specific element link).
     """
     message = Message(
         conversation_id=conversation_id,
@@ -104,20 +131,42 @@ def persist_assistant_message(
     db.commit()
     db.refresh(message)
 
+    candidate_document_ids = {
+        parsed
+        for citation in answer.citations
+        if (parsed := _safe_int(citation.document_id)) is not None
+    }
+    candidate_element_ids = {
+        parsed
+        for citation in answer.citations
+        if (parsed := _safe_int(citation.element_id)) is not None
+    }
+    existing_document_ids = _existing_ids(db, Document.id, candidate_document_ids)
+    existing_element_ids = _existing_ids(db, Element.id, candidate_element_ids)
+
     for rank, citation in enumerate(answer.citations, start=1):
         document_id = _safe_int(citation.document_id)
-        if document_id is None:
+        if document_id is None or document_id not in existing_document_ids:
             logger.warning(
                 "conversation_store.citation_skipped_invalid_document_id",
                 extra={"document_id": citation.document_id, "message_id": message.id},
             )
             continue
+
+        element_id = _safe_int(citation.element_id)
+        if element_id is not None and element_id not in existing_element_ids:
+            logger.warning(
+                "conversation_store.citation_element_id_not_found",
+                extra={"element_id": citation.element_id, "message_id": message.id},
+            )
+            element_id = None
+
         db.add(
             Citation(
                 message_id=message.id,
                 document_id=document_id,
                 page=citation.page,
-                element_id=_safe_int(citation.element_id),
+                element_id=element_id,
                 quote=citation.quote,
                 rank=rank,
             )

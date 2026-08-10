@@ -199,16 +199,18 @@ def test_chat_response_includes_conversation_id_and_persists_messages(chat_clien
 
     assert response.status_code == 200
     conversation_id = response.json()["conversation_id"]
-    assert isinstance(conversation_id, int)
+    # F2-04/§5.6: serialized as a string on the wire, even though the
+    # internal representation (a DB primary key) is an int.
+    assert isinstance(conversation_id, str)
 
     session = db_session_factory()
     try:
-        conversation = session.get(Conversation, conversation_id)
+        conversation = session.get(Conversation, int(conversation_id))
         assert conversation is not None
         assert conversation.title == "hello"
         messages = (
             session.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(Message.conversation_id == int(conversation_id))
             .order_by(Message.id)
             .all()
         )
@@ -231,6 +233,10 @@ def test_chat_reuses_existing_conversation_id(chat_client) -> None:
 
     second = client.post(
         "/api/v1/chat",
+        # `conversation_id` on the wire is a string (§5.6); ChatRequest's
+        # `conversation_id: int | None` field coerces a numeric string
+        # (standard pydantic lenient-mode behavior) — this also exercises
+        # that coercion path, not just a same-type roundtrip.
         json={"message": "follow-up", "conversation_id": conversation_id},
         headers=_auth_headers(token),
     )
@@ -242,7 +248,7 @@ def test_chat_reuses_existing_conversation_id(chat_client) -> None:
     try:
         messages = (
             session.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(Message.conversation_id == int(conversation_id))
             .order_by(Message.id)
             .all()
         )
@@ -274,13 +280,13 @@ def test_chat_stream_done_event_includes_conversation_id_and_persists(chat_clien
     events = _parse_sse_stream(response.text)
     done_payload = events[-1][1]
     conversation_id = done_payload["conversation_id"]
-    assert isinstance(conversation_id, int)
+    assert isinstance(conversation_id, str)
 
     session = db_session_factory()
     try:
         messages = (
             session.query(Message)
-            .filter(Message.conversation_id == conversation_id)
+            .filter(Message.conversation_id == int(conversation_id))
             .order_by(Message.id)
             .all()
         )

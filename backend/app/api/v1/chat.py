@@ -11,14 +11,13 @@ the `chat:write` = "Mengirim pesan chat" scope description,
 *before* the turn runs, so the user's own message is recorded even if the
 LLM call itself times out/errors afterward.
 
-**`ChatResponse.conversation_id`** — see `app/agent/streaming.py`
-`stream_turn`'s `conversation_id` param docstring for the same addition on
-the SSE `done` event: this is an additive field beyond the bare
-`TechnicalAnswer` contract, filling a gap where the client had no way to
-learn a newly-created conversation's id. Flagged to System Analyst for
-formal contract confirmation (see STATUS REPORT) — not a unilateral
-contract change, since it follows the exact precedent already established
-for `ttft_ms`/`total_latency_ms` on the same response/event.
+**`ChatResponse.conversation_id`** — ratified in
+`05-streaming-and-api-contract.md` §5.6 as `str` (this fix, F2-04
+`Documentation/qa-reports/phase-2-qa-report.md`; originally added here as
+`int` and flagged for confirmation, since corrected to match the ratified
+contract type — see `app/agent/streaming.py` `stream_turn`'s
+`conversation_id`/`_with_conversation_id` for the identical treatment on
+the SSE `status`/`error`/`done` events).
 
 **Why the agent/qdrant client/embedding models are built once at app
 startup, not per-request** (`app/main.py`): re-constructing

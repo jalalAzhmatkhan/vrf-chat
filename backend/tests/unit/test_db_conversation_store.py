@@ -10,12 +10,39 @@ from app.agent.schemas import Citation, TechnicalAnswer, Warning
 from app.db import conversation_store as cstore
 from app.db.base import Base
 from app.db.models.conversations import Conversation, Message
+from app.db.models.documents import Document, Page
+from app.db.models.elements import Element
 
 
 def _make_session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return Session(engine)
+
+
+def _seed_document(db: Session, document_id: int) -> Document:
+    document = Document(
+        id=document_id, title="Manual", filename="m.pdf", source_hash=f"hash-{document_id}"
+    )
+    db.add(document)
+    db.commit()
+    return document
+
+
+def _seed_element(db: Session, element_id: int, document_id: int) -> Element:
+    page = Page(document_id=document_id, page_number=1)
+    db.add(page)
+    db.commit()
+    element = Element(
+        id=element_id,
+        document_id=document_id,
+        page_id=page.id,
+        element_type="icon",
+        source_hash=f"hash-el-{element_id}",
+    )
+    db.add(element)
+    db.commit()
+    return element
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +119,9 @@ def test_persist_assistant_message_with_citations() -> None:
     conversation = Conversation(title="C")
     db.add(conversation)
     db.commit()
+    _seed_document(db, 3)
+    _seed_element(db, 42, document_id=3)
+    _seed_element(db, 99, document_id=3)
 
     answer = TechnicalAnswer(
         answer="Press {{el:42}} to reset.",
@@ -184,6 +214,7 @@ def test_persist_assistant_message_citation_with_missing_element_id() -> None:
     conversation = Conversation(title="C")
     db.add(conversation)
     db.commit()
+    _seed_document(db, 3)
 
     answer = TechnicalAnswer(
         answer="See it.",
@@ -204,3 +235,107 @@ def test_persist_assistant_message_citation_with_missing_element_id() -> None:
     db.refresh(message)
     assert len(message.citations) == 1
     assert message.citations[0].element_id is None
+
+
+# ---------------------------------------------------------------------------
+# persist_assistant_message — F2-08 FK existence guard
+# ---------------------------------------------------------------------------
+
+
+def test_persist_assistant_message_document_id_valid_int_but_no_such_document_skipped() -> None:
+    """`document_id="999999"` parses fine as an int, but no such row exists
+    (e.g. a hallucinated/since-deleted document) — must not attempt an
+    insert that would violate the NOT NULL FK, and must not crash."""
+    db = _make_session()
+    conversation = Conversation(title="C")
+    db.add(conversation)
+    db.commit()
+
+    answer = TechnicalAnswer(
+        answer="See it.",
+        confidence=0.9,
+        citations=[
+            Citation(document_id="999999", page=1, element_id="1", element_type="table")
+        ],
+    )
+    message = cstore.persist_assistant_message(
+        db,
+        conversation.id,
+        answer,
+        model_provider="anthropic",
+        model_name="claude",
+        ttft_ms=1,
+        total_latency_ms=2,
+    )
+    db.refresh(message)
+    assert message.citations == []
+
+
+def test_persist_assistant_message_element_id_valid_int_but_no_such_element_nulled() -> None:
+    """`element_id="999999"` parses fine as an int, but no such row exists.
+    Deterministic reproduction of the F2-08 QA repro
+    (`psycopg.errors.ForeignKeyViolation ... citations_element_id_fkey`,
+    `element_id=13` not present in `elements`) — the whole citation must
+    still be persisted (document_id/page/quote remain meaningful), just
+    with `element_id=None`, and must not crash `persist_assistant_message`
+    or the caller (`POST /api/v1/chat` 500 / `POST /api/v1/chat/stream`
+    generator breaking mid-stream, per the QA report)."""
+    db = _make_session()
+    conversation = Conversation(title="C")
+    db.add(conversation)
+    db.commit()
+    _seed_document(db, 3)
+
+    answer = TechnicalAnswer(
+        answer="See it.",
+        confidence=0.9,
+        citations=[
+            Citation(document_id="3", page=60, element_id="999999", element_type="text")
+        ],
+    )
+    message = cstore.persist_assistant_message(
+        db,
+        conversation.id,
+        answer,
+        model_provider="anthropic",
+        model_name="claude",
+        ttft_ms=1,
+        total_latency_ms=2,
+    )
+    db.refresh(message)
+    assert len(message.citations) == 1
+    assert message.citations[0].element_id is None
+    assert message.citations[0].document_id == 3
+    assert message.citations[0].page == 60
+
+
+def test_persist_assistant_message_mixed_valid_and_fk_violating_citations() -> None:
+    db = _make_session()
+    conversation = Conversation(title="C")
+    db.add(conversation)
+    db.commit()
+    _seed_document(db, 3)
+    _seed_element(db, 42, document_id=3)
+
+    answer = TechnicalAnswer(
+        answer="See it.",
+        confidence=0.9,
+        citations=[
+            Citation(document_id="3", page=1, element_id="42", element_type="icon"),
+            Citation(document_id="999999", page=1, element_id="1", element_type="table"),
+            Citation(document_id="3", page=2, element_id="888888", element_type="table"),
+        ],
+    )
+    message = cstore.persist_assistant_message(
+        db,
+        conversation.id,
+        answer,
+        model_provider="anthropic",
+        model_name="claude",
+        ttft_ms=1,
+        total_latency_ms=2,
+    )
+    db.refresh(message)
+    assert len(message.citations) == 2  # the document_id=999999 one is dropped
+    element_ids = sorted((c.element_id for c in message.citations), key=lambda v: (v is None, v))
+    assert element_ids == [42, None]

@@ -70,7 +70,7 @@ from app.agent.answer_postprocess import (
 )
 from app.agent.context_builder import BuiltContext
 from app.agent.schemas import TechnicalAnswer
-from app.agent.tools import AgentDeps
+from app.agent.tools import AgentDeps, build_image_uri_resolver
 from app.agent.vrf_agent import DEFAULT_MAX_REQUESTS_PER_TURN, run_agent_turn
 from app.core.observability import get_logger
 
@@ -283,11 +283,14 @@ async def stream_turn(
         raw_output = TechnicalAnswer(answer=previous_text, confidence=0.0)
 
     context = BuiltContext(elements_by_id=deps.context_elements)
-    post_result = postprocess_answer(raw_output, context)
+    post_result = postprocess_answer(
+        raw_output, context, image_uri_resolver=build_image_uri_resolver(deps)  # F2C2-03
+    )
     final_answer = enforce_never_invent_safety_net(
         post_result.answer,
         tool_call_count=deps.tool_call_count,
         any_chunks_retrieved=deps.any_chunks_retrieved,
+        user_message=user_message,  # §6.1.6
         max_dense_relevance_score=deps.max_dense_relevance_score,  # §6.1
         any_exact_evidence_found=deps.any_exact_evidence_found,  # §6.1
     )

@@ -38,6 +38,7 @@ all — `app/agent/vrf_agent.py` registers thin wrappers around them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from qdrant_client import QdrantClient
@@ -63,6 +64,7 @@ from app.retrieval.hybrid_search import (
     SparseEmbeddingModel,
     search_documents,
 )
+from app.storage.base import ObjectStorageClient
 
 NO_RESULTS_MESSAGE = "No relevant content found in the indexed manuals for this query."
 CIRCUIT_BREAKER_MESSAGE = (
@@ -107,6 +109,15 @@ class AgentDeps:
     # `enforce_never_invent_safety_net`, never by context building.
     max_dense_relevance_score: float | None = None
     any_exact_evidence_found: bool = False
+    # F2C2-03 (`Documentation/qa-reports/phase-2-qa-report-cycle2.md`) —
+    # `None` (default) means `Citation.image_uri` stays the raw
+    # `elements.image_uri` DB value (`file://…`), which is not a resolvable
+    # URL and is exactly the QA-reported bug. `app/api/v1/chat.py` (C2.4)
+    # constructs this per-request from `build_storage_client(settings)`, the
+    # same adapter `app/api/v1/elements.py`/`documents.py` already use for
+    # F2-11 — see `build_image_uri_resolver` below.
+    object_storage: ObjectStorageClient | None = None
+    object_storage_presigned_url_expiry_seconds: int = 3600
 
 
 def _merge_context(deps: AgentDeps, context: BuiltContext) -> None:
@@ -377,8 +388,32 @@ def tool_search_knowledge_graph(
     return KG_STUB_MESSAGE
 
 
+def build_image_uri_resolver(deps: AgentDeps) -> Callable[[str], str] | None:
+    """F2C2-03 — builds the callable `app/agent/answer_postprocess.py`
+    `postprocess_answer` uses to turn a `Citation.image_uri` from a raw
+    `elements.image_uri` DB value (`file://…`, `s3://…`) into a URL the
+    frontend can actually load as `<img src>`, via the SAME
+    `ObjectStorageClient.get_presigned_url` adapter already used by
+    `GET /api/v1/elements/{id}`/`GET /api/v1/documents/{id}/pages/{n}`
+    (F2-11). Returns `None` (meaning: leave `image_uri` untouched) when
+    `deps.object_storage` was never set — this keeps every existing
+    unit test that constructs `AgentDeps` without an `object_storage`
+    unaffected, and degrades to the old (broken) raw-value behavior rather
+    than raising if a caller genuinely omits it."""
+    storage = deps.object_storage
+    if storage is None:
+        return None
+    expiry = deps.object_storage_presigned_url_expiry_seconds
+
+    def resolve(uri: str) -> str:
+        return storage.get_presigned_url(uri, expiry)
+
+    return resolve
+
+
 __all__ = [
     "AgentDeps",
+    "build_image_uri_resolver",
     "tool_find_component",
     "tool_find_troubleshooting_procedure",
     "tool_find_wiring_diagram",

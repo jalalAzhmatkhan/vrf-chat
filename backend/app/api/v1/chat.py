@@ -51,6 +51,7 @@ from app.db.conversation_store import (
 from app.db.engine import get_db
 from app.db.models.conversations import Conversation
 from app.domain.query_expansion import load_known_entities
+from app.storage.factory import build_storage_client
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -85,6 +86,14 @@ def _build_agent_deps(
         circuit_breaker_seconds=settings.RETRIEVAL_CIRCUIT_BREAKER_SECONDS,
         known_entities=known_entities,
         max_chunk_chars=settings.CONTEXT_BUILDER_MAX_CHUNK_CHARS,  # F2-07
+        # F2C2-03 — same adapter app/api/v1/elements.py/documents.py already
+        # use to resolve elements.image_uri (F2-11); built fresh per-request,
+        # matching that existing pattern (cheap: no network I/O at
+        # construction time for any of the three backends).
+        object_storage=build_storage_client(settings),
+        object_storage_presigned_url_expiry_seconds=(
+            settings.OBJECT_STORAGE_PRESIGNED_URL_EXPIRY_SECONDS
+        ),
     )
 
 

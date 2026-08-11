@@ -31,6 +31,7 @@ from app.agent.context_builder import BuiltContext
 from app.agent.schemas import TechnicalAnswer
 from app.agent.tools import (
     AgentDeps,
+    build_image_uri_resolver,
     tool_find_component,
     tool_find_troubleshooting_procedure,
     tool_find_wiring_diagram,
@@ -250,11 +251,14 @@ async def run_agent_turn(
         usage_limits=effective_usage_limits,
     )
     context = BuiltContext(elements_by_id=deps.context_elements)
-    post_result = postprocess_answer(result.output, context)
+    post_result = postprocess_answer(
+        result.output, context, image_uri_resolver=build_image_uri_resolver(deps)  # F2C2-03
+    )
     return enforce_never_invent_safety_net(
         post_result.answer,
         tool_call_count=deps.tool_call_count,
         any_chunks_retrieved=deps.any_chunks_retrieved,
+        user_message=user_message,  # §6.1.6
         max_dense_relevance_score=deps.max_dense_relevance_score,  # §6.1
         any_exact_evidence_found=deps.any_exact_evidence_found,  # §6.1
     )

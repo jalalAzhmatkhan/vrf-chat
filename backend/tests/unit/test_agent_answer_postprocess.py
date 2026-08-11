@@ -134,6 +134,91 @@ def test_postprocess_answer_element_page_none_defaults_to_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# postprocess_answer — F2C2-03 image_uri_resolver
+# ---------------------------------------------------------------------------
+
+
+def test_postprocess_answer_no_resolver_leaves_raw_image_uri_unchanged() -> None:
+    """Default behavior (no resolver passed) — exactly the pre-F2C2-03 bug,
+    preserved as the explicit default so every existing caller/test that
+    never passes image_uri_resolver keeps working unchanged."""
+    element = _element(4961, element_type="icon", image_uri="file://documents/5/pages/30/x.png")
+    context = BuiltContext(elements_by_id={4961: element})
+    answer = TechnicalAnswer(answer="Press {{el:4961}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context)
+
+    assert result.answer.citations[0].image_uri == "file://documents/5/pages/30/x.png"
+
+
+def test_postprocess_answer_resolver_applied_to_backfilled_citation() -> None:
+    element = _element(4961, element_type="icon", image_uri="file://documents/5/pages/30/x.png")
+    context = BuiltContext(elements_by_id={4961: element})
+    answer = TechnicalAnswer(answer="Press {{el:4961}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(
+        answer, context, image_uri_resolver=lambda uri: f"http://localhost:8000/resolved?u={uri}"
+    )
+
+    assert result.answer.citations[0].image_uri == (
+        "http://localhost:8000/resolved?u=file://documents/5/pages/30/x.png"
+    )
+
+
+def test_postprocess_answer_resolver_applied_to_validated_model_citation() -> None:
+    """The resolver must also apply to a citation the model itself proposed
+    (not just backfilled-from-marker ones) — F2-02's overwrite path."""
+    element = _element(42, element_type="figure", image_uri="file://documents/5/x.png")
+    context = BuiltContext(elements_by_id={42: element})
+    model_citation = Citation(document_id="999", page=1, element_id="42", element_type="text")
+    answer = TechnicalAnswer(
+        answer="See the figure.", confidence=0.9, citations=[model_citation]
+    )
+
+    result = pp.postprocess_answer(
+        answer, context, image_uri_resolver=lambda uri: f"http://resolved/{uri}"
+    )
+
+    assert result.answer.citations[0].image_uri == "http://resolved/file://documents/5/x.png"
+
+
+def test_postprocess_answer_resolver_not_applied_to_non_visual_element() -> None:
+    """Resolver must only ever be invoked for visual element types — a
+    non-visual citation's image_uri is always None regardless of resolver."""
+    calls: list[str] = []
+
+    def resolver(uri: str) -> str:
+        calls.append(uri)
+        return uri
+
+    element = _element(1, element_type="table")
+    context = BuiltContext(elements_by_id={1: element})
+    answer = TechnicalAnswer(answer="See {{el:1}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context, image_uri_resolver=resolver)
+
+    assert result.answer.citations[0].image_uri is None
+    assert calls == []
+
+
+def test_postprocess_answer_resolver_not_called_for_none_image_uri() -> None:
+    calls: list[str] = []
+
+    def resolver(uri: str) -> str:
+        calls.append(uri)
+        return uri
+
+    element = _element(4961, element_type="icon", image_uri=None)
+    context = BuiltContext(elements_by_id={4961: element})
+    answer = TechnicalAnswer(answer="Press {{el:4961}}.", confidence=0.9)
+
+    result = pp.postprocess_answer(answer, context, image_uri_resolver=resolver)
+
+    assert result.answer.citations[0].image_uri is None
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # postprocess_answer — F2-02 citations[] whitelist validation
 # ---------------------------------------------------------------------------
 

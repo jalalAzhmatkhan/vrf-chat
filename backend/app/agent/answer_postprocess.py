@@ -52,12 +52,19 @@ before it is sent in the `done` SSE event (`app/api/v1/chat.py`, C2.4):
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.agent.context_builder import BuiltContext, ContextElement
 from app.agent.schemas import VISUAL_ELEMENT_TYPES, Citation, TechnicalAnswer, Warning
 from app.core.observability import get_logger
 from app.retrieval.hybrid_search import MIN_RELEVANCE_SCORE
+
+# F2C2-03 — a callable turning a raw `elements.image_uri` DB value
+# (`file://…`, `s3://…`) into a URL the frontend can load, or `None` to
+# leave it untouched (matches every pre-F2C2-03 caller/test that never
+# passes one). See `app/agent/tools.py::build_image_uri_resolver`.
+ImageUriResolver = Callable[[str], str]
 
 logger = get_logger(__name__)
 
@@ -81,7 +88,18 @@ def _strip_marker(text: str, element_id: int) -> str:
     return text.replace(f"{{{{el:{element_id}}}}}", "")
 
 
-def _citation_from_context_element(element: ContextElement) -> Citation:
+def _resolve_image_uri(image_uri: str | None, resolver: ImageUriResolver | None) -> str | None:
+    """F2C2-03 — apply `resolver` (see module-level `ImageUriResolver`) to a
+    raw `elements.image_uri` DB value, or pass it through unchanged if no
+    resolver was given (`None`) or there is nothing to resolve."""
+    if image_uri is None or resolver is None:
+        return image_uri
+    return resolver(image_uri)
+
+
+def _citation_from_context_element(
+    element: ContextElement, *, image_uri_resolver: ImageUriResolver | None = None
+) -> Citation:
     is_visual = element.element_type in VISUAL_ELEMENT_TYPES
     is_table = element.element_type == "table"
     return Citation(
@@ -90,7 +108,7 @@ def _citation_from_context_element(element: ContextElement) -> Citation:
         element_id=str(element.element_id),
         element_type=element.element_type,
         quote=element.text,
-        image_uri=element.image_uri if is_visual else None,
+        image_uri=_resolve_image_uri(element.image_uri, image_uri_resolver) if is_visual else None,
         visual_description=element.visual_description if is_visual else None,
         content_structured=element.content_structured if is_table else None,
     )
@@ -111,14 +129,19 @@ def _resolve_context_element(element_id: str, context: BuiltContext) -> ContextE
 
 
 def _validate_and_normalize_citations(
-    citations: list[Citation], context: BuiltContext
+    citations: list[Citation],
+    context: BuiltContext,
+    *,
+    image_uri_resolver: ImageUriResolver | None = None,
 ) -> tuple[list[Citation], tuple[str, ...]]:
     """F2-02 gate — see module docstring point 2. Never trust `citations[]`
     as sent by the model: drop anything outside this turn's whitelist, and
     overwrite every positional/type field on what survives from the
     authoritative `ContextElement` (`quote` is the one field left as the
     model provided it — it is free text, not something the backend has an
-    authoritative value for)."""
+    authoritative value for). `image_uri` is additionally passed through
+    `image_uri_resolver` (F2C2-03) — the same presigned-URL adapter used
+    everywhere else `elements.image_uri` reaches an HTTP response."""
     validated: list[Citation] = []
     dropped_ids: list[str] = []
     for citation in citations:
@@ -134,7 +157,11 @@ def _validate_and_normalize_citations(
                     "document_id": str(element.document_id),
                     "page": element.page or 0,
                     "element_type": element.element_type,
-                    "image_uri": element.image_uri if is_visual else None,
+                    "image_uri": (
+                        _resolve_image_uri(element.image_uri, image_uri_resolver)
+                        if is_visual
+                        else None
+                    ),
                     "visual_description": element.visual_description if is_visual else None,
                     "content_structured": element.content_structured if is_table else None,
                 }
@@ -143,11 +170,23 @@ def _validate_and_normalize_citations(
     return validated, tuple(dropped_ids)
 
 
-def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostProcessResult:
+def postprocess_answer(
+    answer: TechnicalAnswer,
+    context: BuiltContext,
+    *,
+    image_uri_resolver: ImageUriResolver | None = None,
+) -> PostProcessResult:
     """Apply the two non-negotiable deterministic gates to `answer` (produced
     by the agent this turn) against `context` (everything retrieved/shown to
     the LLM this turn, from every tool call): §5.1 layer-3 marker validation,
     and F2-02 citation validation/normalization.
+
+    `image_uri_resolver` (F2C2-03, optional): applied to every citation's
+    `image_uri` (backfilled or model-provided-then-validated) — `None`
+    (default) leaves `image_uri` as the raw DB value, matching every
+    pre-F2C2-03 caller/test unchanged. `app/agent/vrf_agent.py::run_agent_turn`
+    and `app/agent/streaming.py::stream_turn` pass one built from
+    `app/agent/tools.py::build_image_uri_resolver`.
     """
     valid_element_ids = set(context.elements_by_id.keys())
     found_element_ids = {int(match) for match in MARKER_PATTERN.findall(answer.answer)}
@@ -166,7 +205,7 @@ def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostPr
         )
 
     validated_citations, dropped_citation_ids = _validate_and_normalize_citations(
-        answer.citations, context
+        answer.citations, context, image_uri_resolver=image_uri_resolver
     )
     if dropped_citation_ids:
         logger.warning(
@@ -181,7 +220,11 @@ def postprocess_answer(answer: TechnicalAnswer, context: BuiltContext) -> PostPr
         key = str(element_id)
         if key in existing_by_element_id:
             continue
-        citations.append(_citation_from_context_element(context.elements_by_id[element_id]))
+        citations.append(
+            _citation_from_context_element(
+                context.elements_by_id[element_id], image_uri_resolver=image_uri_resolver
+            )
+        )
         backfilled_element_ids.append(element_id)
 
     updated_answer = answer.model_copy(update={"answer": fixed_text, "citations": citations})
@@ -201,12 +244,78 @@ NO_EVIDENCE_WARNING = Warning(
     severity="note",
 )
 
+# F2C2-04/§6.1.7 (`Documentation/system-design/03-retrieval-chunking.md`) —
+# whenever `enforce_never_invent_safety_net` force-refuses (either branch
+# below), `answer.answer` is REPLACED with this text, not just `refused`/
+# `warnings`. Without this, a force-refused turn still carried the model's
+# original off-domain claim verbatim (e.g. "The capital city of France is
+# Paris...") straight to the user underneath a "not found in manual" badge —
+# `04-chat-ui.md` §11's `RefusedNotice` renders `answer` verbatim and
+# explicitly assumes it is ALWAYS a refusal sentence the model composed
+# itself, an assumption that only held for model-initiated refusals before
+# this fix.
+NO_EVIDENCE_REFUSAL_TEXT = (
+    "I could not find relevant information in the indexed service manuals for "
+    "this question. Please try rephrasing with a specific error code, unit "
+    "model, or component name."
+)
+
+# §6.1.6 — closed, manually-curated starting list (explicitly a starting
+# point, like MIN_RELEVANCE_SCORE — meant to be extended from real usage
+# evidence, not treated as final/exhaustive). Deliberately NOT substring/
+# keyword matching against arbitrary message content: that is unbounded
+# whack-a-mole for the open set of off-topic subjects (exactly why
+# domain-adjacent near-misses, §6.1.8, need a reranker instead of a keyword
+# list). This list only ever matches the user message's ENTIRE (trimmed,
+# case-folded) text.
+_CONVERSATIONAL_PATTERNS = frozenset(
+    {
+        "hi",
+        "hello",
+        "hey",
+        "halo",
+        "hai",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "selamat pagi",
+        "selamat siang",
+        "selamat sore",
+        "selamat malam",
+        "thanks",
+        "thank you",
+        "terima kasih",
+        "makasih",
+        "bye",
+        "goodbye",
+        "see you",
+        "ok",
+        "okay",
+        "noted",
+        "got it",
+        "great",
+        "oke",
+        "baik",
+    }
+)
+
+
+def _matches_conversational_pattern(user_message: str) -> bool:
+    """§6.1.6 — whole-message match (never substring) against the closed
+    list above. A false negative (an unusual greeting/closing that doesn't
+    match) only costs a slightly less smooth UX (politely refused instead
+    of answered casually) — never a safety risk: this exemption only ever
+    SUPPRESSES a refusal that would otherwise fire, it can never suppress a
+    legitimate one, so under-matching is the safe failure direction."""
+    return user_message.strip().casefold() in _CONVERSATIONAL_PATTERNS
+
 
 def enforce_never_invent_safety_net(
     answer: TechnicalAnswer,
     *,
     tool_call_count: int,
     any_chunks_retrieved: bool,
+    user_message: str,
     max_dense_relevance_score: float | None = None,
     any_exact_evidence_found: bool = False,
 ) -> TechnicalAnswer:
@@ -216,14 +325,51 @@ def enforce_never_invent_safety_net(
     guarantee — see task instructions: "Implementasikan sebagai perilaku
     yang bisa dites, bukan sekadar kalimat di system prompt").
 
-    Never touches an already-`refused=True` answer, and never fires for a
-    no-tool-call conversational turn (`tool_call_count == 0` — small talk,
-    clarifying question) — both preserved unchanged from the original
-    (pre-§6.1) version of this gate.
+    Never touches an already-`refused=True` answer. Three independent ways
+    to force `refused=True` (§6.1, `Documentation/system-design/03-retrieval-chunking.md`):
 
-    Two independent ways to force `refused=True` (§6.1,
-    `Documentation/system-design/03-retrieval-chunking.md`):
-
+    0. **§6.1.6, new — `tool_call_count == 0` — REVERSED from the pre-cycle-2
+       default.** Previously this was an unconditional early-return (never
+       force refuse when no tool was called at all). QA's cycle-2 testing
+       found `gpt-3.5-turbo` frequently answers general-knowledge questions
+       ("Who won the 2018 FIFA World Cup?", "What is the square root of
+       144?") straight from parametric knowledge, calling zero tools — so
+       the ENTIRE gate (including branches 1/2 below) never even evaluated
+       for exactly the class of question it exists to catch. The default is
+       now REVERSED: no tool call now means force-refuse UNLESS one of two
+       narrow, deterministic, conservative exemptions matches:
+       - `_matches_conversational_pattern(user_message)` — the user's
+         message itself is a greeting/closing/short acknowledgement (closed
+         curated list, see that function).
+       - `answer.answer.strip().endswith("?")` — the agent's own answer
+         looks like it's asking a clarifying question back, not asserting a
+         factual claim.
+       Both are deliberately narrow and biased toward refusing (a
+       false-negative on either just means an unusual-but-legitimate
+       small-talk/clarification turn gets politely refused instead of
+       answered naturally — a UX cost, not a safety issue — whereas a
+       false-positive would silently let an ungrounded factual claim
+       through, which is the exact failure this whole gate exists to
+       prevent). Explicitly NOT solved by a dense-relevance probe on the raw
+       user message (an approach QA proposed and priced at ~8.4ms, cheap
+       enough) — rejected on conceptual grounds, not cost: similarity-to-
+       corpus cannot distinguish small talk from an out-of-domain factual
+       question, since both score low against a VRF/VRV manual corpus
+       ("Hi" and "Who won the 2018 World Cup?" would likely score similarly
+       low) — applying §6.1.4's threshold here would wrongly refuse
+       ordinary greetings, reintroducing the exact over-refusal risk the
+       original early-return existed to prevent. **Deliberate trade-off,
+       stated explicitly**: this also refuses in-scope questions the model
+       happens to answer without ever opening a tool (e.g. "what is R410A"
+       answered from general HVAC knowledge) — intentional, not a bug: for
+       a chatbot whose entire value proposition is being precise about
+       *this specific service manual's* content (not generic HVAC
+       knowledge), answering without ever consulting the manual violates
+       "never invent" regardless of whether the general-knowledge answer
+       happens to be correct. `app/agent/vrf_agent.py`'s system prompt is
+       strengthened in tandem — a request to the model to always call a
+       tool for non-greeting questions, layer 2 on top of this deterministic
+       gate, never a substitute for it.
     1. **Original branch, unchanged**: `not any_chunks_retrieved and not
        answer.citations` — the agent called a tool but genuinely got
        nothing back at all (circuit breaker triggered, or a
@@ -238,7 +384,7 @@ def enforce_never_invent_safety_net(
        it preserves that test suite's existing, intentional behavior
        unchanged rather than requiring it to be rewritten for a
        code-generalization that doesn't need to touch this branch at all).
-    2. **§6.1, new**: `not any_exact_evidence_found AND
+    2. **§6.1.4**: `not any_exact_evidence_found AND
        max_dense_relevance_score is not None AND
        max_dense_relevance_score < MIN_RELEVANCE_SCORE` — the agent *did*
        retrieve chunks (branch 1 doesn't apply), but every semantic search
@@ -271,18 +417,44 @@ def enforce_never_invent_safety_net(
     there is no relevance signal to threshold against, and branch 1 remains
     the only applicable check in that case, exactly as before §6.1.
 
+    **F2C2-04/§6.1.7**: whichever branch forces a refusal, `answer.answer`
+    is replaced with `NO_EVIDENCE_REFUSAL_TEXT` (not just `refused`/
+    `warnings`) — see that constant's docstring for why.
+
     **Explicitly out of scope, by calibrated design** (`03-retrieval-chunking.md`
-    §6.1.3 round 2 / §6.1.5): domain-adjacent near-miss questions (e.g. "how
+    §6.1.3 round 2 / §6.1.8): domain-adjacent near-miss questions (e.g. "how
     do I fix a window AC that isn't cooling" against a VRF/VRV commercial
     manual corpus) score in the same range as genuine in-scope questions —
     this gate does not and cannot separate those two classes; that is an
-    explicitly accepted residual risk pending a Fase 2 cross-encoder
-    reranker, not a bug in this implementation.
+    explicitly accepted residual risk under active escalation (cross-encoder
+    reranker, §6.1.8), not a bug in this implementation.
+
+    **Known residual risk, deliberately NOT addressed here** (§6.1.6): a
+    multi-turn follow-up that refers back to evidence already retrieved in
+    an earlier turn of the same conversation (e.g. "what did P8 mean
+    again?") may call zero tools this turn (`tool_call_count` resets per
+    turn/request — `AgentDeps` is rebuilt fresh every call) and may not
+    match either exemption above, risking a wrong force-refuse of an
+    otherwise-legitimate answer. No cross-turn state is added to this gate
+    to anticipate this — System Analyst deliberately deferred that pending
+    QA evidence of how often it actually occurs, to avoid adding unproven
+    complexity.
     """
     if answer.refused:
         return answer
+
     if tool_call_count == 0:
-        return answer
+        is_greeting_or_closing = _matches_conversational_pattern(user_message)
+        is_clarifying_reply = answer.answer.strip().endswith("?")
+        if is_greeting_or_closing or is_clarifying_reply:
+            return answer
+        return answer.model_copy(
+            update={
+                "refused": True,
+                "answer": NO_EVIDENCE_REFUSAL_TEXT,
+                "warnings": [*answer.warnings, NO_EVIDENCE_WARNING],
+            }
+        )
 
     force_refuse = (not any_chunks_retrieved and not answer.citations) or (
         not any_exact_evidence_found
@@ -291,7 +463,11 @@ def enforce_never_invent_safety_net(
     )
     if force_refuse:
         return answer.model_copy(
-            update={"refused": True, "warnings": [*answer.warnings, NO_EVIDENCE_WARNING]}
+            update={
+                "refused": True,
+                "answer": NO_EVIDENCE_REFUSAL_TEXT,
+                "warnings": [*answer.warnings, NO_EVIDENCE_WARNING],
+            }
         )
     return answer
 

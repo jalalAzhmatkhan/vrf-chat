@@ -88,31 +88,52 @@ DEFAULT_CIRCUIT_BREAKER_SECONDS = 8.0
 # recall) without changing the final result count.
 PREFETCH_MULTIPLIER = 4
 
-# §6.1 (`Documentation/system-design/03-retrieval-chunking.md`) — relevance
+# §6.1.4 (`Documentation/system-design/03-retrieval-chunking.md`) — relevance
 # floor for the "never invent" safety net (`app/agent/answer_postprocess.py`
 # `enforce_never_invent_safety_net`), NOT used to filter/rank the chunks
 # returned to the LLM (RRF fusion above remains the sole source of truth for
-# *context*). Calibrated empirically 2026-08-11 against the live `vrf_chunks`
-# collection (document_id=4 fully ingested, 3,607 points, 1/6 source
-# documents — see §6.1.3 for the full methodology and numbers) using the
-# production embedding model (`BAAI/bge-small-en-v1.5`):
-#   - Clearly out-of-scope queries (the exact F2-03 QA repro class, e.g.
-#     "What is the capital city of France?"): top-1 dense cosine 0.4932-0.6609
-#   - Genuine in-scope queries: top-1 dense cosine 0.7697-0.8790
-#   - 0.68 sits in the gap between those two ranges (NOT a tightly-tuned
-#     threshold like THRESHOLD_TABLE/THRESHOLD_TEXT in
-#     `02-ingestion-pipeline.md` §3-4 — a starting point, still grounded in
-#     real data rather than a guess).
+# *context*).
+#
+# [REVISED 2026-08-11, cycle 2] 0.68 -> 0.72. QA recalibrated
+# (`Documentation/qa-reports/phase-2-qa-report-cycle2.md` §5,
+# `vrf-qa/scripts/phase2_cycle2_recalibrate_relevance.py`, same methodology
+# as the original §6.1.3 calibration) against the live `vrf_chunks`
+# collection now that the full 6-document corpus is ingested (11,993
+# points, up from 3,607/1 document), n=62 (up from 19), same production
+# embedding model (`BAAI/bge-small-en-v1.5`):
+#   - Clearly out-of-scope queries: top-1 dense cosine 0.5232-0.7101
+#     (up from 0.4932-0.6609 at 1 document — more chunks means a higher
+#     chance *something* looks "close enough" to any given query)
+#   - Genuine in-scope queries (all sub-classes: verbatim/terse/per-vendor/
+#     obscure-tail): top-1 dense cosine 0.7356-0.9197
+#   - 0.68 had drifted INSIDE the out-of-scope distribution by this point —
+#     5/16 clearly-out-of-scope queries scored above it (one confirmed live:
+#     "What is the square root of 144?", 0.6819, still answered). 0.72 is
+#     QA's threshold-sweep recommendation: 16/16 out-of-scope rejected,
+#     0/36 in-scope wrongly rejected at n=62. Margin to the lowest genuine
+#     in-scope score (0.7356, "Mitsubishi check code 1102 PUHY-P") is thin
+#     (0.0156) — do NOT raise this above 0.72 without a much larger
+#     in-scope sample (0.74 already misclassifies 1/36 in-scope on QA's
+#     sweep).
+#
 # Explicitly does NOT separate domain-adjacent near-miss queries (e.g. "how
 # do I fix a window AC that isn't cooling") from genuine in-scope ones —
-# §6.1.3 round 2 found full score overlap (0.7153-0.7964 vs 0.7486-0.8377)
-# for that class; that is an accepted residual risk (see §6.1.5), not
-# something this constant is meant to solve. MUST be recalibrated if
-# `EMBEDDER_DENSE_MODEL` changes (cosine similarity distributions are
-# model-specific) or once the full 7-document corpus is ingested (this
-# snapshot is 1/6 documents) — see `calibrate_relevance.py`-equivalent
-# script embedded in §6.1.3 for the reusable calibration methodology.
-MIN_RELEVANCE_SCORE = 0.68
+# confirmed again at this corpus size (domain-adjacent 0.6646-0.8007, full
+# overlap with in-scope); this is an accepted residual risk under active
+# escalation (§6.1.8: cross-encoder reranker promoted to "Fase 2, active
+# next priority"), not something this constant is meant to solve.
+#
+# RECALIBRATION POLICY (§6.1.4, tightened this cycle): NOT "recalibrate once
+# after a big corpus change" — recalibrate EVERY time a new source document
+# finishes ingesting (`status=ready`), no "significant" threshold judgment
+# call. The 1->6 document shift alone was enough to invalidate 0.68; there
+# is no evidence a smaller shift is safe to ignore. Run
+# `vrf-qa/scripts/phase2_cycle2_recalibrate_relevance.py` (read-only, no
+# LLM/GPU, well under 1 minute at 11,993 points) before treating a newly
+# ingested document as production-ready, and update this docstring's
+# snapshot (n, corpus size, date, source) every time the constant changes —
+# never leave a stale snapshot next to a live value.
+MIN_RELEVANCE_SCORE = 0.72
 
 
 class DenseEmbeddingModel(Protocol):

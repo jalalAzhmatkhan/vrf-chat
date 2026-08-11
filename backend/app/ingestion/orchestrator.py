@@ -389,11 +389,18 @@ def run_ingestion_pipeline(
         )
 
         def _run_chunking() -> Any:
+            # [2026-08-11, round 3 memory fix] `_load_chunkable_elements`
+            # streams `Element` rows (`yield_per`) instead of materializing
+            # every row's full ORM state at once — see that function's
+            # docstring. `store_chunks` returns a count, not
+            # `list[Chunk]` — see chunker.py module docstring "round 3" for
+            # why the OLD `list[Chunk]` return was itself O(document)
+            # accumulation under this project's `expire_on_commit=False`.
             elements = _load_chunkable_elements(db, document_id)
             drafts = build_chunks(elements) + build_entity_chunks(elements)
             return store_chunks(db, document_id, drafts)
 
-        chunk_rows = stages.run(STAGE_CHUNKING, _run_chunking)
+        chunks_stored = stages.run(STAGE_CHUNKING, _run_chunking)
 
         def _run_embedding() -> int:
             client = qdrant_client or build_qdrant_client(settings)
@@ -411,6 +418,8 @@ def run_ingestion_pipeline(
             delete_chunks_by_document(client, settings.VECTOR_STORE_COLLECTION, document_id)
             dense = dense_model or FastEmbedDenseModel(settings.EMBEDDER_DENSE_MODEL)
             sparse = sparse_model or FastEmbedSparseModel(settings.EMBEDDER_SPARSE_MODEL)
+            # [2026-08-11, round 3 memory fix] batched internally — see
+            # embedder.py module docstring "round 3".
             return embed_and_upsert_chunks(
                 db,
                 client,
@@ -419,6 +428,7 @@ def run_ingestion_pipeline(
                 dense_model=dense,
                 sparse_model=sparse,
                 model_family=document.model_family,
+                batch_size=settings.EMBEDDING_BATCH_SIZE,
             )
 
         embedded_count = stages.run(STAGE_EMBEDDING, _run_embedding)
@@ -435,33 +445,58 @@ def run_ingestion_pipeline(
         document_id=document_id,
         pages_stored=batch_result.pages_stored,
         elements_stored=batch_result.elements_stored,
-        chunks_stored=len(chunk_rows),
+        chunks_stored=chunks_stored,
         chunks_embedded=embedded_count,
         cascade_task_count=batch_result.cascade_task_count,
     )
 
 
+# [2026-08-11, round 3 memory fix] Purely an internal DB-cursor-fetch batch
+# size for `_load_chunkable_elements` below (not an OOM-critical tunable
+# like `INGESTION_PAGE_BATCH_SIZE`, so not exposed via `Settings`/env — see
+# that function's docstring for what this does and doesn't fix).
+_CHUNKABLE_ELEMENTS_YIELD_PER = 500
+
+
 def _load_chunkable_elements(db: Session, document_id: int) -> list[ChunkableElement]:
-    rows = db.execute(
+    """[2026-08-11, round 3 memory fix] Streams `Element` rows via
+    `execution_options(yield_per=...)` instead of `.all()`, and
+    `db.expunge()`s each `Element` ORM row right after mapping it to a
+    lightweight `ChunkableElement` — avoids holding every row's full ORM
+    state (jsonb `visual_description`/`kg_candidate_entities`/`bbox`, etc.)
+    simultaneously with the mapped dataclasses during the load itself. See
+    `docs/ingestion-page-range-batching.md` §3 (round 3) and the
+    module-level docstring of `chunker.py` for the fuller picture — the
+    RETURNED `list[ChunkableElement]` here is still held in full (needed by
+    `build_chunks`, which is deliberately NOT restructured into page-range
+    batches this round — see that docstring for the full risk analysis);
+    this streaming load only avoids DOUBLE-holding raw ORM rows alongside
+    the (lighter) mapped dataclasses during the query itself.
+    """
+    result = db.execute(
         select(Element, Page.page_number)
         .join(Page, Element.page_id == Page.id)
         .where(Element.document_id == document_id)
         .order_by(Page.page_number, Element.id)
-    ).all()
-    return [
-        ChunkableElement(
-            element_id=element.id,
-            element_type=element.element_type,
-            text=element.text,
-            page_number=page_number,
-            parent_id=element.parent_id,
-            section_path=element.section_path or [],
-            image_uri=element.image_uri,
-            visual_description=element.visual_description,
-            kg_candidate_entities=element.kg_candidate_entities or [],
+        .execution_options(yield_per=_CHUNKABLE_ELEMENTS_YIELD_PER)
+    )
+    elements: list[ChunkableElement] = []
+    for element, page_number in result:
+        elements.append(
+            ChunkableElement(
+                element_id=element.id,
+                element_type=element.element_type,
+                text=element.text,
+                page_number=page_number,
+                parent_id=element.parent_id,
+                section_path=element.section_path or [],
+                image_uri=element.image_uri,
+                visual_description=element.visual_description,
+                kg_candidate_entities=element.kg_candidate_entities or [],
+            )
         )
-        for element, page_number in rows
-    ]
+        db.expunge(element)
+    return elements
 
 
 def prepare_document_for_ingestion(

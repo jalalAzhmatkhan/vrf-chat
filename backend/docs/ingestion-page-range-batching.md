@@ -7,10 +7,16 @@ Not a `Documentation/system-design/` doc (out of Backend Engineer's write scope)
 record. See `### DIRECT MESSAGE -> System Analyst` in the STATUS REPORT for
 this task.
 
-**Two rounds in this doc**: round 1 (Docling-only batching) was verified
+**Three rounds in this doc**: round 1 (Docling-only batching) was verified
 against the real 567-page document and **still OOM'd** — see §2. Round 2
-(this doc's current state) restructures the pipeline further; §6 records
-what IS/ISN'T verified for round 2 given continued environment instability.
+(parse -> cascade -> store -> release per batch) was ALSO verified against
+the real document, this time via memory sampling — it genuinely fixed the
+per-batch loop (flat ~5.3GB across a 36-minute run) but a new, more precise
+data point showed the OOM had simply moved to the very next stage
+(`chunking`/`embedding`, both still whole-document) — see §8. Round 3 (this
+doc's current state) extends the same principle to those stages, with an
+explicit, reasoned exception for the chunk-*grouping* algorithm itself
+(§8.2) — §9 records what IS/ISN'T verified for round 3.
 
 ## 1. Problem (hard evidence, not a hypothesis)
 
@@ -319,3 +325,231 @@ once per document:
   and (c) the partial improvement above already meaningfully reduces
   wasted work on retry without that risk. Flagged as a follow-up
   candidate, not silently dropped.
+
+## 8. Round 3: chunking/embedding — real evidence round 2 wasn't the end of the story
+
+The coordinator ran round 2 against the real 567-page document **with
+memory sampling** (a real profiler-equivalent, not a hypothesis):
+
+```
+t+2100s  rss=5.351 MB   peak=8.183 MB
+t+2130s  rss=5.351 MB
+t+2160s  rss=5.351 MB      <- flat for ~36 minutes
+t+2190s  rss=8.989 MB      <- sudden spike
+t+2220s  rss=10.408 MB
+OOM:     anon-rss 10,885,484 kB (~10.9 GB)
+```
+
+Compared to before: pre-batching died in 1-2 minutes at ~12.5GB; round 1
+survived ~10 minutes at ~12.7GB; round 2 survived **~37 minutes**, **flat
+at 5.3GB** for most of the run, peaking at 10.9GB. **This is real,
+positive, measured confirmation that round 2's per-batch loop works** —
+memory genuinely stayed flat across many batches instead of accumulating,
+directly corroborating the `expire_on_commit=False` + `db.expunge()`
+diagnosis in §2/§3.2.
+
+The spike (5.3GB -> 9.0GB -> 10.4GB -> OOM) happened in the ~60 seconds
+**immediately after** the batch loop finished — i.e. during `chunking`/
+`embedding`, both still whole-document operations at the time (explicitly
+called out as "not implicated by the evidence" in round 2's own STATUS
+REPORT — that was accurate given the evidence available *then*; this new,
+more precise timing data changes that).
+
+### 8.1 Structural verification (done before patching, per instruction)
+
+Given the explicit instruction to verify before patching, and given a real
+profiler run was not repeatable in this environment (WSL down again — see
+§9), verification here is via READING the code, not re-measuring:
+
+- **`app/ingestion/chunker.py` `_load_chunkable_elements`** (before this
+  round): `select(Element, Page.page_number)....all()` — one query loading
+  every `Element` row for the document (for 567 pages, on the order of
+  several thousand rows, each with `bbox`/`kg_candidate_entities`/
+  `kg_candidate_relations`/`visual_description` jsonb payloads) into one
+  Python list, all at once, with no `db.expunge()`.
+- **`app/ingestion/chunker.py` `store_chunks`** (before this round):
+  accumulated every newly-created `Chunk` ORM object into a `rows: list
+  [Chunk]`, RETURNED that list all the way up through `run_ingestion_
+  pipeline`'s `chunk_rows` local variable — kept alive (per this project's
+  `expire_on_commit=False`, `app/db/engine.py`) all the way through the
+  `embedding` stage too, purely to support `len(chunk_rows)` at the very
+  end. Structurally identical to the exact bug already found and fixed in
+  `canonical_store.py` in round 2.
+- **`app/ingestion/embedder.py` `embed_and_upsert_chunks`** (before this
+  round): `select(Chunk).where(status=='pending')....all()` — every
+  pending chunk for the document loaded into one list, one `texts` list
+  built from all of them, one `dense_model.embed(texts)`/`sparse_model.
+  embed(texts)` call over the WHOLE list, one `points` list holding a
+  Qdrant point per chunk, one `qdrant_client.upsert()` call — fully
+  whole-document, no batching, no expunge anywhere.
+
+**Honest caveat, exactly as asked**: this confirms BOTH sub-stages are
+unambiguously whole-document as coded — a real, verifiable structural fact
+— but does NOT, and cannot without a profiler, tell us the precise GB
+split between them, or rule out a THIRD contributor (e.g. first-time
+`fastembed`/ONNX model loading inside `_ensure_loaded()`, which is a
+one-time, potentially large fixed-cost allocation event that could
+plausibly explain a sudden jump rather than a gradual ramp — the sampling
+interval, 30s, is too coarse to distinguish "sudden model-load spike" from
+"fast accumulation across ~3000+ chunks" within the same window). Given
+both `chunker.py` and `embedder.py` are unambiguously buggy in the SAME
+way already fixed elsewhere in this codebase (whole-document ORM
+accumulation under `expire_on_commit=False`), and the task's explicit
+directive was to extend the SAME principle to every remaining whole-
+document stage rather than isolate one exact culprit, both were fixed —
+see §8.3.
+
+### 8.2 Deliberately NOT touched: the chunk-*grouping* algorithm itself
+
+`build_chunks`/`build_entity_chunks` (`app/ingestion/chunker.py`) are
+**unchanged** this round — no page-range batching was applied to the
+chunk-grouping algorithm itself. This was an explicit request from the
+coordinator ("kalau menurutmu chunking tidak bisa dipecah tanpa merusak
+semantik, katakan begitu dan usulkan alternatif") — here is that answer:
+
+**Why it's genuinely harder than `canonical_store.py`'s round-2 fix**:
+`store_pages_and_elements`'s per-batch design worked because each element
+is independently INSERTed once, and the only cross-batch dependency
+(`parent_id` FK) is resolved via a small carried `int -> int` dict
+(`local_id_to_db_id`). Chunking has a STRUCTURALLY different problem:
+
+1. **Running chunk continuation is stateful across page boundaries.**
+   `build_chunks` keeps a chunk "open" (`current_text_chunk_index`/
+   `current_procedure_chunk_index`) and APPENDS to it across MULTIPLE
+   elements/pages as long as `section_path` matches and the char limit
+   isn't hit — a chunk that would naturally span, say, pages 99-101 must
+   not be artificially split into two chunks just because a page-range
+   batch boundary happens to fall at page 100. Splitting it would change
+   the actual PERSISTED content (different chunk boundaries, different
+   `content_text` groupings) — a real semantic regression, not just an
+   internal implementation detail, and one the required equivalence tests
+   would (correctly) catch.
+2. **Icon/figure_caption "always join parent chunk" can reach back
+   arbitrarily far** (module docstring, "most critical requirement in the
+   whole project") — a chunk that needs to be joined might already be
+   CLOSED and durably persisted in an EARLIER batch. Handling this
+   correctly would require being able to re-open and `UPDATE` an
+   already-persisted, already-`db.expunge()`d `Chunk` row from a prior
+   batch (fetch by id, append, re-save) — a real, buildable mechanism in
+   principle, but one that adds a genuinely new code path (UPDATE-in-place
+   on a previously-closed chunk) that doesn't exist anywhere else in this
+   codebase yet, and that the existing equivalence-test suite doesn't
+   exercise.
+
+**Alternatives considered** (per the request to propose them, not just
+decline):
+
+- **Streaming query (`yield_per`) but still building ALL chunks in one
+  logical, uninterrupted pass** — i.e. don't split the ALGORITHM into
+  independent batches at all, just avoid materializing the full ORM
+  result set during the LOAD. This is what was actually implemented (see
+  §8.3) — it's a real, if partial, improvement (avoids double-holding raw
+  `Element` ORM state alongside the mapped `ChunkableElement`s during
+  the query), but the mapped `elements: list[ChunkableElement]` list, and
+  the `drafts: list[ChunkDraft]` list `build_chunks`/`build_entity_chunks`
+  produce, are still held in full, in memory, for the whole document.
+  Judged an acceptable, bounded cost: `ChunkableElement`/`ChunkDraft` are
+  plain lightweight dataclasses (no SQLAlchemy `InstanceState`/session
+  machinery), so even a few thousand of them is a materially smaller
+  footprint than the ORM-object accumulation bugs that WERE fixed (§8.3) —
+  though this is a reasoned estimate, not a profiled number (see §8.1's
+  caveat).
+- **Process per-section instead of per-page-range batch**: since chunk
+  continuation is scoped by `section_path`, batching by SECTION rather
+  than by PAGE COUNT would mean a batch boundary never falls in the middle
+  of a would-be-continued chunk. This is a genuinely more chunking-aware
+  batching unit than a raw page count — but doesn't solve problem #2
+  above (an icon can still reference a parent in an EARLIER section/batch)
+  and would need its own carried state (last-open-chunk-per-section,
+  `element_id -> chunk_id` map) built and verified with the same rigor as
+  `ParseCarryState`/`local_id_to_db_id` were in rounds 1-2. Deferred as a
+  candidate future round, not attempted here — building AND verifying it
+  correctly needs either real infrastructure (currently unavailable, WSL
+  down) or a much larger synthetic-equivalence-test investment than was
+  safe to take on together with the other round-3 fixes in the same pass.
+
+### 8.3 What WAS fixed this round
+
+- **`app/ingestion/chunker.py` `_load_chunkable_elements`**: streams via
+  `execution_options(yield_per=500)` instead of `.all()`, `db.expunge()`s
+  each `Element` row immediately after mapping it to a `ChunkableElement`.
+- **`app/ingestion/chunker.py` `store_chunks`**: now returns an `int`
+  count instead of `list[Chunk]`; every `Chunk` row is `db.flush()`ed (to
+  assign its id) and `db.expunge()`d immediately after insert, instead of
+  being accumulated into a list held alive through the rest of the
+  ingestion run. This was the more clear-cut, "definitely a bug not a
+  trade-off" fix — unlike §8.2's chunk-grouping algorithm, nothing about
+  `store_chunks`'s OWN correctness required holding onto the ORM objects
+  after insert (nothing downstream ever used the returned `list[Chunk]`
+  for anything but `len(...)` — confirmed by grepping every call site).
+- **`app/ingestion/embedder.py` `embed_and_upsert_chunks`**: new
+  `batch_size` parameter (default 500, `Settings.EMBEDDING_BATCH_SIZE`,
+  `app/core/config.py`) — processes chunks in bounded-size passes
+  (`WHERE embedding_status='pending' LIMIT batch_size`, repeated until
+  none remain — chunks already embedded fall out of the filter naturally,
+  no offset-pagination needed), `db.commit()`+`db.expunge()`+`gc.collect()`
+  per inner batch. For `batch_size >= total pending chunks` this reduces
+  to exactly the pre-round-3 single-call behavior (useful equivalence
+  anchor, exercised directly in
+  `tests/unit/test_ingestion_embedder.py`).
+- **Known, deliberately out-of-scope exception found while auditing**:
+  `app/ingestion/kg_candidate_reextractor.py` also does a whole-document
+  `select(...).all()` load. NOT touched — its own module docstring
+  states an explicit, pre-existing Wave 1 DoD constraint ("seluruh
+  perubahan hidup di modul KG candidate... jangan ubah orchestrator.py
+  atau canonical_store.py") specifically to avoid a real merge conflict
+  with the not-yet-merged Fase 2 branch — and it is a separate, low-
+  frequency maintenance tool (KG re-extraction for already-ingested
+  documents, "~seconds per document" per its own docstring), not part of
+  the `run_ingestion_pipeline` hot path this whole investigation has been
+  about. Flagged here for visibility, not fixed.
+
+## 9. What is verified vs. NOT verified (round 3)
+
+**Verified:**
+
+- 428 unit tests pass (up from 424 after round 2), 100% line/branch
+  coverage, `ruff check .` clean, `mypy app/` clean.
+- New regression tests directly proving the `expire_on_commit=False`
+  accumulation is fixed for both changed modules — `tests/unit/
+  test_ingestion_chunker.py test_store_chunks_expunges_created_rows_from_
+  session` and `tests/unit/test_ingestion_embedder.py
+  test_embed_and_upsert_chunks_expunges_processed_chunks_from_session`
+  both assert the SQLAlchemy session's identity map is empty of the
+  relevant ORM class after the call, same pattern as round 2's analogous
+  `canonical_store.py` test.
+- `test_embed_and_upsert_chunks_processes_multiple_batches` proves the
+  batching loop actually processes chunks in bounded-size groups (not
+  just accepting `batch_size` and ignoring it) and that every pending
+  chunk still gets embedded/upserted regardless.
+- All of round 2's equivalence tests (batched vs. unbatched ingestion
+  producing identical persisted `elements` rows) still pass unmodified —
+  confirms round 3's changes did not alter `canonical_store.py`'s
+  behavior at all (it was not touched this round).
+
+**NOT verified (environment constraint — WSL was down again for this
+entire round, before any work started):**
+
+- **No real run against the actual 567-page document for round 3's fix.**
+  Unlike round 2 (which the coordinator verified with real memory
+  sampling), round 3 has NO real-hardware confirmation at all — the
+  `wsl -e bash -lc "..."` smoke check at the start of this round returned
+  `Wsl/Service/E_UNEXPECTED` immediately, before any diagnostic command
+  could even run. All verification is the unit test suite above.
+- **§8.1's honest caveat stands**: even with real hardware, this round's
+  fix was not preceded by a profiler run isolating the EXACT chunking-vs-
+  embedding-vs-model-loading split — the fix targets everything that was
+  structurally confirmed (by reading code) to be whole-document, which is
+  a defensible action given the task's explicit "extend the same
+  principle everywhere" directive, but is not the same rigor as round 2's
+  real measurement.
+- Recommended next step, unchanged in spirit: once WSL is stable, retry
+  the 567-page document with the SAME memory-sampling approach that
+  produced the round-2 data. If the process now completes successfully
+  (or at least gets meaningfully further before any new OOM), that
+  confirms round 3; if a NEW spike appears at a different point, that
+  timing data is exactly what's needed to decide whether §8.2's
+  chunk-grouping algorithm restructuring (deferred) is actually necessary,
+  or whether the residual `ChunkableElement`/`ChunkDraft` list-holding
+  discussed in §8.2's first alternative turns out to matter more than
+  estimated.

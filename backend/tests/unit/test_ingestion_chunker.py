@@ -605,9 +605,9 @@ def test_store_chunks_persists_rows() -> None:
         )
     ]
 
-    rows = ck.store_chunks(db, document_id=1, drafts=drafts)
+    count = ck.store_chunks(db, document_id=1, drafts=drafts)
 
-    assert len(rows) == 1
+    assert count == 1
     stored = db.execute(select(Chunk)).scalars().all()
     assert len(stored) == 1
     assert stored[0].content_hash == ck.compute_content_hash(drafts[0])
@@ -684,3 +684,31 @@ def test_store_chunks_scoped_to_document_id() -> None:
     stored = db.execute(select(Chunk)).scalars().all()
     assert len(stored) == 2
     assert {row.document_id for row in stored} == {1, 2}
+
+
+def test_store_chunks_expunges_created_rows_from_session() -> None:
+    """[2026-08-11, round 3 memory fix] Regression guard, same pattern as
+    `test_ingestion_canonical_store.py`'s analogous test — `Chunk` ORM
+    objects created by `store_chunks` must not remain resident in the
+    session's identity map afterward (this project's `Session` has
+    `expire_on_commit=False`, `app/db/engine.py`, so a plain `db.commit()`
+    alone would not release them)."""
+    db = _make_session()
+    drafts = [
+        ck.ChunkDraft(
+            chunk_type="text",
+            section_path=["Ch1"],
+            page_start=1,
+            page_end=1,
+            content_text=f"Chunk {i}",
+            content_structured=None,
+            element_ids=[i],
+        )
+        for i in range(5)
+    ]
+
+    count = ck.store_chunks(db, document_id=1, drafts=drafts)
+
+    assert count == 5
+    identity_map_classes = {type(state.object) for state in db.identity_map.all_states()}
+    assert identity_map_classes == set()

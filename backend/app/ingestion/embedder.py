@@ -23,10 +23,30 @@ PaddleOCR-VL, but still a real model, not meaningfully unit-testable) —
 idempotency orchestration around them is fully unit-tested with fakes. Real
 usage verified via a live smoke test against a real Qdrant instance (see
 STATUS REPORT).
+
+**[2026-08-11, page-range batching round 3]** `embed_and_upsert_chunks` now
+processes `batch_size` pending chunks at a time (default 500, see
+`app/core/config.py` `EMBEDDING_BATCH_SIZE`) instead of loading every
+`pending` chunk for a document in one `select(Chunk)...all()` call — for
+the 567-page "Zeggo VRV III" document, a real memory-sampled run showed the
+process jump from a flat ~5.3GB (during round 2's per-batch ingestion loop)
+to ~10.9GB and OOM within ~60 seconds AFTER that loop finished — i.e.
+during `chunking`/`embedding`, both still whole-document at the time. See
+`docs/ingestion-page-range-batching.md` §3 (round 3) for the full
+investigation (including the honest caveat that the exact split between
+this module and `chunker.py`'s `store_chunks` could not be measured more
+precisely — both were unambiguously whole-document and are both fixed this
+round). Re-queries `WHERE embedding_status == 'pending' LIMIT batch_size`
+each iteration (not offset-based pagination) — chunks already embedded in
+this call naturally fall out of that filter, so this correctly drains the
+pending queue in bounded-size passes. `Chunk` ORM rows are `db.expunge()`d
+after each inner batch, same `expire_on_commit=False` (`app/db/engine.py`)
+rationale as `canonical_store.py`/`chunker.py`.
 """
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -214,6 +234,7 @@ def embed_and_upsert_chunks(
     dense_model: DenseEmbeddingModel,
     sparse_model: SparseEmbeddingModel,
     model_family: str | None = None,
+    batch_size: int = 500,
 ) -> int:
     """Embed every `pending` chunk for `document_id` and upsert to
     `collection`, updating `chunks.embedding_status`/`vector_id`.
@@ -221,47 +242,69 @@ def embed_and_upsert_chunks(
     Returns the number of chunks embedded. Idempotent within a single call
     (only `pending` chunks are processed) — re-running after a full success
     is a no-op (nothing left `pending`); a chunk left `pending` after a
-    partial failure is retried on the next call.
+    partial failure is retried on the next call (any earlier batch within
+    THIS call that already committed stays `embedded` — see module
+    docstring "round 3": each inner batch is committed independently, so a
+    failure partway through only leaves the REMAINING chunks `pending`, not
+    the ones already embedded/committed in prior iterations of this call).
+
+    `batch_size` (default 500, see module docstring "round 3") bounds how
+    many chunks are loaded/embedded/upserted per inner iteration — see
+    module docstring for the full rationale.
     """
-    pending_chunks = (
-        db.execute(
-            select(Chunk).where(
-                Chunk.document_id == document_id,
-                Chunk.embedding_status == EMBEDDING_STATUS_PENDING,
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+    total_embedded = 0
+    while True:
+        pending_chunks = (
+            db.execute(
+                select(Chunk)
+                .where(
+                    Chunk.document_id == document_id,
+                    Chunk.embedding_status == EMBEDDING_STATUS_PENDING,
+                )
+                .order_by(Chunk.id)
+                .limit(batch_size)
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    if not pending_chunks:
-        return 0
+        if not pending_chunks:
+            break
 
-    texts = [chunk.content_text for chunk in pending_chunks]
-    dense_vectors = dense_model.embed(texts)
-    sparse_vectors = sparse_model.embed(texts)
+        texts = [chunk.content_text for chunk in pending_chunks]
+        dense_vectors = dense_model.embed(texts)
+        sparse_vectors = sparse_model.embed(texts)
 
-    points = []
-    for chunk, dense_vector, sparse_vector in zip(
-        pending_chunks, dense_vectors, sparse_vectors, strict=True
-    ):
-        points.append(
-            qmodels.PointStruct(
-                id=chunk.id,
-                vector={
-                    DENSE_VECTOR_NAME: dense_vector,
-                    SPARSE_VECTOR_NAME: qmodels.SparseVector(
-                        indices=sparse_vector.indices, values=sparse_vector.values
-                    ),
-                },
-                payload=_build_payload(chunk, model_family),
+        points = []
+        for chunk, dense_vector, sparse_vector in zip(
+            pending_chunks, dense_vectors, sparse_vectors, strict=True
+        ):
+            points.append(
+                qmodels.PointStruct(
+                    id=chunk.id,
+                    vector={
+                        DENSE_VECTOR_NAME: dense_vector,
+                        SPARSE_VECTOR_NAME: qmodels.SparseVector(
+                            indices=sparse_vector.indices, values=sparse_vector.values
+                        ),
+                    },
+                    payload=_build_payload(chunk, model_family),
+                )
             )
-        )
 
-    qdrant_client.upsert(collection_name=collection, points=points)
+        qdrant_client.upsert(collection_name=collection, points=points)
 
-    for chunk in pending_chunks:
-        chunk.embedding_status = EMBEDDING_STATUS_EMBEDDED
-        chunk.vector_id = str(chunk.id)
+        for chunk in pending_chunks:
+            chunk.embedding_status = EMBEDDING_STATUS_EMBEDDED
+            chunk.vector_id = str(chunk.id)
+        db.commit()
 
-    db.commit()
-    return len(pending_chunks)
+        total_embedded += len(pending_chunks)
+        for chunk in pending_chunks:
+            db.expunge(chunk)
+        del pending_chunks, texts, dense_vectors, sparse_vectors, points
+        gc.collect()
+
+    return total_embedded

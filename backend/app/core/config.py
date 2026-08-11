@@ -278,6 +278,23 @@ class Settings(BaseSettings):
     # PaddleOCR-VL) for both dense and sparse (Qdrant-native BM25). ----
     EMBEDDER_DENSE_MODEL: str = "BAAI/bge-small-en-v1.5"
     EMBEDDER_SPARSE_MODEL: str = "Qdrant/bm25"
+    # EMBEDDING_BATCH_SIZE: [Backend Engineer, 2026-08-11, page-range
+    # batching round 3] `app/ingestion/embedder.py` `embed_and_upsert_chunks`
+    # now processes this many `pending` chunks per inner iteration (embed +
+    # Qdrant upsert + mark-embedded + commit + `db.expunge()`) instead of
+    # loading every pending chunk for a document at once — added after a
+    # real memory-sampled run on the 567-page "Zeggo VRV III" document
+    # showed the process jump from a flat ~5.3GB (during the per-batch
+    # ingestion loop, `INGESTION_PAGE_BATCH_SIZE`) to ~10.9GB and OOM within
+    # ~60 seconds AFTER that loop finished — during chunking/embedding,
+    # both still whole-document at the time. See
+    # `docs/ingestion-page-range-batching.md` §3 (round 3) for the full
+    # investigation. 500 is a reasonable default (chunks are much lighter
+    # than raw PDF pages, so this can be larger than
+    # `INGESTION_PAGE_BATCH_SIZE` without real memory risk, while still
+    # bounding both the SQLAlchemy session's per-batch object count and the
+    # embedding model's per-call input size).
+    EMBEDDING_BATCH_SIZE: int = 500
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod

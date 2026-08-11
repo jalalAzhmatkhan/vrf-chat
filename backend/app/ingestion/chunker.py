@@ -34,6 +34,35 @@ separable follow-up work, not required for retrieval to function, per the
 project's stated preference for adding complexity only when proven
 necessary (see e.g. `04-provider-abstractions.md` Bagian D §1 rationale
 applying the same principle elsewhere).
+
+**[2026-08-11, page-range batching round 3]** After round 2's per-batch
+`parse -> cascade -> store -> release` loop (`app/ingestion/orchestrator.py`)
+was verified via real memory sampling to hold flat at ~5.3GB across a
+36-minute run on the 567-page "Zeggo VRV III" document (proving the
+per-batch principle genuinely works), the SAME real run still OOM'd
+~60 seconds AFTER the batch loop finished — i.e. during `chunking`/
+`embedding`, both of which were still whole-document operations. See
+`docs/ingestion-page-range-batching.md` §3 (round 3) for the full
+investigation.
+
+`build_chunks`/`build_entity_chunks` themselves are **deliberately NOT**
+restructured into page-range batches in this round — see that doc's §3.2
+for the full risk analysis. In short: the chunk-grouping algorithm needs
+essentially unbounded lookback (a running text/procedure chunk can span a
+batch boundary, and — per the module's own "most critical requirement"
+above — an icon/figure_caption can join a parent chunk that was closed and
+persisted in an EARLIER batch), and safely reopening/`UPDATE`ing an
+already-persisted chunk across batch boundaries without breaking either
+guarantee could not be built AND verified with confidence in this
+environment (WSL down again during this round — see STATUS REPORT). What
+WAS fixed this round: `store_chunks` no longer accumulates every `Chunk`
+ORM object it creates into a list held alive for the rest of the ingestion
+run (same `expire_on_commit=False` issue already fixed in
+`canonical_store.py` — each row is now flushed + `db.expunge()`d
+immediately after insert, and the function returns a count, not the list
+of objects) — this is the piece of the whole-document chunking path that
+was unambiguously a bug (not a reasoned trade-off) and safely fixable
+without touching the chunk-grouping algorithm's semantics at all.
 """
 
 from __future__ import annotations
@@ -415,8 +444,9 @@ def compute_content_hash(draft: ChunkDraft) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def store_chunks(db: Session, document_id: int, drafts: list[ChunkDraft]) -> list[Chunk]:
-    """Persist `drafts` as `chunks` rows for `document_id`.
+def store_chunks(db: Session, document_id: int, drafts: list[ChunkDraft]) -> int:
+    """Persist `drafts` as `chunks` rows for `document_id`. Returns the
+    number of chunks stored.
 
     Idempotency strategy (simpler than I1.5's page-level hash diffing,
     deliberately — see module docstring rationale): chunking is a cheap,
@@ -426,11 +456,25 @@ def store_chunks(db: Session, document_id: int, drafts: list[ChunkDraft]) -> lis
     chunks wholesale rather than diffing chunk-by-chunk. `content_hash` is
     still computed and stored per chunk for I1.8's embedding-idempotency use
     (`06-data-schema.md` §1 "content_hash # idempotency re-embedding").
+
+    **[2026-08-11, round 3 memory fix]** Returns an `int` count, not
+    `list[Chunk]` — the caller (`app/ingestion/orchestrator.py`) previously
+    held the full list of ORM objects alive for the rest of
+    `run_ingestion_pipeline` (used only for `len(...)`), which is the exact
+    same `expire_on_commit=False` (`app/db/engine.py`) accumulation bug
+    already fixed in `canonical_store.py` — a `db.commit()` alone does not
+    release previously-loaded objects, so for a large document this list
+    was thousands of fully-loaded `Chunk` rows (each with `content_text`/
+    `content_structured` jsonb) staying resident through `embedding` too.
+    Each row is now `db.flush()`ed (to get its id, still needed by nothing
+    outside this function today, but flushed for durable ordering/FK
+    consistency) and `db.expunge()`d immediately after insert, matching
+    `store_pages_and_elements`'s pattern. See module docstring "round 3".
     """
     db.execute(delete(Chunk).where(Chunk.document_id == document_id))
     db.flush()
 
-    rows: list[Chunk] = []
+    count = 0
     for draft in drafts:
         row = Chunk(
             document_id=document_id,
@@ -446,8 +490,9 @@ def store_chunks(db: Session, document_id: int, drafts: list[ChunkDraft]) -> lis
             embedding_status="pending",
         )
         db.add(row)
-        rows.append(row)
+        db.flush()
+        db.expunge(row)
+        count += 1
 
-    db.flush()
     db.commit()
-    return rows
+    return count

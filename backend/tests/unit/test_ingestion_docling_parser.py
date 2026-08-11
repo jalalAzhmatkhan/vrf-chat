@@ -406,6 +406,195 @@ def test_confidence_report_with_no_pages_attribute() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page-range batching equivalence (2026-08-11 OOM fix) — CLAUDE.md §4:
+# batched output MUST be identical to a single unbatched pass, especially
+# the icon<->text association across page/batch boundaries (SA1.2).
+# ---------------------------------------------------------------------------
+
+
+def _as_comparable(elements: list[dp.ElementDraft]) -> list[tuple[Any, ...]]:
+    """Project the fields that must be identical between a single-pass and a
+    batched-then-merged run (excludes nothing — every field matters for
+    traceability/parent-linking, see module docstring)."""
+    return [
+        (
+            e.local_id,
+            e.element_type,
+            e.text,
+            e.page_number,
+            e.parent_local_id,
+            tuple(e.section_path),
+        )
+        for e in elements
+    ]
+
+
+def test_batched_parse_matches_single_pass_icon_fallback_across_batch_boundary() -> None:
+    """The exact SA1.2 scenario (page of icons with no text of its own,
+    falling back to the last text/heading seen earlier in the document) but
+    with the batch boundary placed BETWEEN the two pages — i.e. the
+    heading/paragraph are parsed in batch 1 and the icon-only page is
+    parsed in batch 2, as `_run_docling_in_batches` would do it. Batched
+    result must match a single unbatched pass over both pages exactly."""
+    page1_items = [
+        _item("section_header", "#/texts/0", text="Pictograms", page_no=1, level=1),
+        _item("text", "#/texts/1", text="See legend below.", page_no=1),
+    ]
+    page2_items = [
+        _item("picture", "#/pictures/0", page_no=2, bbox=(10, 780, 30, 765)),
+        _item("picture", "#/pictures/1", page_no=2, bbox=(40, 780, 60, 765)),
+    ]
+    page_sizes = {1: (609.0, 793.0), 2: (609.0, 793.0)}
+
+    # --- Single unbatched pass over both pages ---
+    single_doc = FakeDoc(page1_items + page2_items, page_sizes=page_sizes)
+    single_confidence = _confidence_report({1: _page_scores(), 2: _page_scores()})
+    single_result = dp.map_document_to_elements(single_doc, single_confidence, page_count=2)
+
+    # --- Batched: batch 1 = page 1 only, batch 2 = page 2 only ---
+    batch1_doc = FakeDoc(page1_items, page_sizes={1: page_sizes[1]})
+    batch1_confidence = _confidence_report({1: _page_scores()})
+    batch1_result = dp.map_document_to_elements(
+        batch1_doc, batch1_confidence, page_count=1, page_range=(1, 1)
+    )
+
+    batch2_doc = FakeDoc(page2_items, page_sizes={2: page_sizes[2]})
+    batch2_confidence = _confidence_report({2: _page_scores()})
+    batch2_result = dp.map_document_to_elements(
+        batch2_doc,
+        batch2_confidence,
+        page_count=2,
+        page_range=(2, 2),
+        carry_state=batch1_result.carry_state,
+    )
+
+    merged_elements = batch1_result.elements + batch2_result.elements
+    merged_confidence = {**batch1_result.page_confidence, **batch2_result.page_confidence}
+
+    assert _as_comparable(merged_elements) == _as_comparable(single_result.elements)
+    assert merged_confidence == single_result.page_confidence
+
+    # The critical assertion (CLAUDE.md §4): both icons on page 2 (a
+    # separate BATCH from the text that should parent them) still resolve
+    # to the page-1 paragraph, not NULL.
+    icon_1, icon_2 = batch2_result.elements
+    paragraph = batch1_result.elements[1]
+    assert icon_1.parent_local_id == paragraph.local_id
+    assert icon_2.parent_local_id == paragraph.local_id
+
+
+def test_batched_parse_matches_single_pass_section_path_across_batch_boundary() -> None:
+    """A heading opened in batch 1 must still be the `section_path` for
+    body text parsed in batch 2, with no heading of its own in that batch."""
+    page1_items = [
+        _item("title", "#/texts/0", text="Chapter 7", page_no=1, level=1),
+        _item("section_header", "#/texts/1", text="7.3 Troubleshooting", page_no=1, level=2),
+        _item("text", "#/texts/2", text="Body text under 7.3, page 1.", page_no=1),
+    ]
+    page2_items = [
+        _item("text", "#/texts/0", text="Continued body text, page 2.", page_no=2),
+    ]
+    page_sizes = {1: (609.0, 793.0), 2: (609.0, 793.0)}
+
+    single_doc = FakeDoc(page1_items + page2_items, page_sizes=page_sizes)
+    single_confidence = _confidence_report({1: _page_scores(), 2: _page_scores()})
+    single_result = dp.map_document_to_elements(single_doc, single_confidence, page_count=2)
+
+    batch1_doc = FakeDoc(page1_items, page_sizes={1: page_sizes[1]})
+    batch1_result = dp.map_document_to_elements(
+        batch1_doc,
+        _confidence_report({1: _page_scores()}),
+        page_count=1,
+        page_range=(1, 1),
+    )
+    batch2_doc = FakeDoc(page2_items, page_sizes={2: page_sizes[2]})
+    batch2_result = dp.map_document_to_elements(
+        batch2_doc,
+        _confidence_report({2: _page_scores()}),
+        page_count=2,
+        page_range=(2, 2),
+        carry_state=batch1_result.carry_state,
+    )
+
+    merged_elements = batch1_result.elements + batch2_result.elements
+    assert _as_comparable(merged_elements) == _as_comparable(single_result.elements)
+    assert batch2_result.elements[0].section_path == ["Chapter 7", "7.3 Troubleshooting"]
+    # local_id stayed globally unique/monotonic across the batch boundary.
+    assert batch2_result.elements[0].local_id == batch1_result.elements[-1].local_id + 1
+
+
+def test_carry_state_defaults_match_pre_batching_behavior() -> None:
+    """No `carry_state`/`page_range` given (the pre-2026-08-11 call shape,
+    still used by every non-batched call site) behaves exactly as before:
+    `local_id` starts at 1, `section_path` starts empty, no document-wide
+    icon-parent fallback available yet."""
+    items = [_item("picture", "#/pictures/0", page_no=1, bbox=(10, 780, 30, 765))]
+    doc = FakeDoc(items, page_sizes={1: (609.0, 793.0)})
+    result = dp.map_document_to_elements(doc, _confidence_report({1: _page_scores()}), page_count=1)
+
+    assert result.elements[0].local_id == 1
+    assert result.elements[0].parent_local_id is None
+    assert result.carry_state.next_local_id == 2
+    assert result.carry_state.section_path == []
+    assert result.carry_state.last_text_local_id_doc is None
+
+
+def test_docling_parser_parse_forwards_page_range_and_carry_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    convert_calls: list[dict[str, Any]] = []
+
+    class FakeResult:
+        document = FakeDoc(
+            [_item("text", "#/texts/0", text="hi", page_no=5)],
+            page_sizes={5: (609.0, 793.0)},
+        )
+        confidence = _confidence_report({5: _page_scores()})
+
+    class FakeConverter:
+        def convert(self, path: str, **kwargs: Any) -> FakeResult:
+            convert_calls.append(kwargs)
+            return FakeResult()
+
+    monkeypatch.setattr(dp, "_build_converter", lambda device: FakeConverter())
+
+    parser = dp.DoclingParser(device="cpu")
+    carry_in = dp.ParseCarryState(next_local_id=42, section_path=["Ch1"], last_text_local_id_doc=7)
+    result = parser.parse("dummy.pdf", page_range=(5, 5), carry_state=carry_in)
+
+    assert convert_calls == [{"page_range": (5, 5)}]
+    assert result.elements[0].local_id == 42  # carried, not reset to 1
+    assert result.elements[0].page_number == 5
+
+
+def test_docling_parser_parse_without_page_range_omits_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backward compatibility: the default (unbatched) call shape must not
+    pass `page_range` to `converter.convert()` at all, matching the exact
+    call signature used before this change (some real Docling `convert()`
+    overloads/mocks in existing tests only accept a bare path)."""
+    convert_calls: list[tuple[Any, ...]] = []
+
+    class FakeResult:
+        document = FakeDoc([_item("text", "#/texts/0", text="hi")], page_sizes={1: (609.0, 793.0)})
+        confidence = _confidence_report({1: _page_scores()})
+
+    class FakeConverter:
+        def convert(self, path: str) -> FakeResult:  # no **kwargs on purpose
+            convert_calls.append((path,))
+            return FakeResult()
+
+    monkeypatch.setattr(dp, "_build_converter", lambda device: FakeConverter())
+
+    parser = dp.DoclingParser(device="cpu")
+    result = parser.parse("dummy.pdf")
+
+    assert convert_calls == [("dummy.pdf",)]
+    assert result.elements[0].local_id == 1
+
+
+# ---------------------------------------------------------------------------
 # DoclingParser orchestration + unload
 # ---------------------------------------------------------------------------
 
@@ -445,6 +634,37 @@ def test_docling_parser_parse_caches_converter(monkeypatch: pytest.MonkeyPatch) 
     assert build_calls == ["cpu"]  # converter built once, reused across parse() calls
     assert parser.is_loaded is True
     assert parser.device == "cpu"
+
+
+def test_docling_parser_parse_cuda_empties_cache_after_each_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[2026-08-11 OOM fix] `parse()` itself (not just `unload()`) releases
+    the CUDA cache after every call — this is the per-batch memory release
+    `_run_docling_in_batches` relies on when `DOCLING_DEVICE=cuda`."""
+    empty_cache_calls = {"count": 0}
+    monkeypatch.setattr(dp.torch.cuda, "empty_cache", lambda: empty_cache_calls.__setitem__(
+        "count", empty_cache_calls["count"] + 1
+    ))
+    monkeypatch.setattr(dp.torch.cuda, "is_available", lambda: True)
+
+    class FakeResult:
+        document = FakeDoc(
+            [_item("text", "#/texts/0", text="hi")], page_sizes={1: (609.0, 793.0)}
+        )
+        confidence = _confidence_report({1: _page_scores()})
+
+    class FakeConverter:
+        def convert(self, path: str, **kwargs: Any) -> FakeResult:
+            return FakeResult()
+
+    monkeypatch.setattr(dp, "_build_converter", lambda device: FakeConverter())
+
+    parser = dp.DoclingParser(device="cuda")
+    parser.parse("dummy.pdf")
+    parser.parse("dummy.pdf")
+
+    assert empty_cache_calls["count"] == 2  # once per parse() call, not just on unload()
 
 
 def _track_empty_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:

@@ -67,6 +67,15 @@ def _write_pdf(path: Path) -> None:
     doc.close()
 
 
+def _write_multi_page_pdf(path: Path, num_pages: int) -> None:
+    doc = pymupdf.open()
+    for i in range(num_pages):
+        page = doc.new_page(width=600, height=800)
+        page.insert_textbox(pymupdf.Rect(50, 50, 550, 750), f"Page {i + 1} content.")
+    doc.save(str(path))
+    doc.close()
+
+
 def _page_confidence(page_number: int = 1, parse_score: float | None = 1.0) -> PageConfidence:
     return PageConfidence(
         page_number=page_number,
@@ -79,15 +88,56 @@ def _page_confidence(page_number: int = 1, parse_score: float | None = 1.0) -> P
     )
 
 
+def _result_for_page(page_number: int) -> DoclingParseResult:
+    """A minimal one-element `DoclingParseResult`, used by
+    `_run_docling_in_batches` tests to fake each batch returning a distinct
+    per-batch result (so the merge logic is actually exercised, not just
+    the same canned object N times)."""
+    return DoclingParseResult(
+        elements=[
+            ElementDraft(
+                local_id=1,
+                element_type="paragraph",
+                text=f"page {page_number}",
+                bbox=None,
+                page_number=page_number,
+                parent_local_id=None,
+                section_path=[],
+                extraction_method="docling",
+                extraction_confidence=1.0,
+            )
+        ],
+        page_confidence={page_number: _page_confidence(page_number)},
+        page_count=page_number,
+    )
+
+
 class FakeDoclingParser:
+    """[2026-08-11 page-range batching] `parse()` now accepts `page_range`/
+    `carry_state` kwargs (see `app/ingestion/orchestrator.py`
+    `_run_docling_in_batches`) — this fake records every `page_range` it
+    was called with (`parse_page_ranges`) so orchestration wiring (correct
+    number of batches, correct page windows) can be asserted without a real
+    Docling model."""
+
     def __init__(self, parse_result: DoclingParseResult) -> None:
         self._parse_result = parse_result
         self.is_loaded = True
         self.parse_calls = 0
         self.unload_calls = 0
+        self.parse_page_ranges: list[tuple[int, int] | None] = []
+        self.parse_carry_states: list[Any] = []
 
-    def parse(self, pdf_path: Any) -> DoclingParseResult:
+    def parse(
+        self,
+        pdf_path: Any,
+        *,
+        page_range: tuple[int, int] | None = None,
+        carry_state: Any = None,
+    ) -> DoclingParseResult:
         self.parse_calls += 1
+        self.parse_page_ranges.append(page_range)
+        self.parse_carry_states.append(carry_state)
         return self._parse_result
 
     def unload(self) -> None:
@@ -334,6 +384,13 @@ def test_run_ingestion_pipeline_full_success(pipeline_env: dict[str, Any]) -> No
     assert result.chunks_embedded == result.chunks_stored
     assert result.cascade_task_count == 1  # the low-confidence table
 
+    # [2026-08-11 page-range batching] a 1-page document fits in a single
+    # batch (default INGESTION_PAGE_BATCH_SIZE=100) — Docling is still
+    # called exactly once, with an explicit page_range derived from Stage
+    # 1's probe, not the old no-page_range call shape.
+    assert pipeline_env["docling_parser"].parse_calls == 1
+    assert pipeline_env["docling_parser"].parse_page_ranges == [(1, 1)]
+
     db = pipeline_env["db"]
     document = db.get(Document, pipeline_env["document"].id)
     assert document.status == "ready"
@@ -388,7 +445,13 @@ def test_run_ingestion_pipeline_stage_failure_marks_job_and_document_failed(
     pipeline_env: dict[str, Any],
 ) -> None:
     class BrokenDoclingParser(FakeDoclingParser):
-        def parse(self, pdf_path: Any) -> DoclingParseResult:
+        def parse(
+            self,
+            pdf_path: Any,
+            *,
+            page_range: tuple[int, int] | None = None,
+            carry_state: Any = None,
+        ) -> DoclingParseResult:
             raise RuntimeError("docling exploded")
 
     broken_parser = BrokenDoclingParser(pipeline_env["docling_parser"]._parse_result)
@@ -415,3 +478,101 @@ def test_run_ingestion_pipeline_stage_failure_marks_job_and_document_failed(
     assert jobs[-1].stage == orch.STAGE_DOCLING
     assert jobs[-1].status == "failed"
     assert "docling exploded" in jobs[-1].error_message
+
+
+# ---------------------------------------------------------------------------
+# _run_docling_in_batches (2026-08-11 page-range batching OOM fix)
+# ---------------------------------------------------------------------------
+
+
+def test_run_docling_in_batches_single_batch_when_total_pages_fits(tmp_path: Path) -> None:
+    """A document with fewer pages than `page_batch_size` is still parsed
+    with an explicit `page_range`, in exactly one batch/`parse()` call."""
+    pdf_path = tmp_path / "small.pdf"
+    _write_pdf(pdf_path)
+    parse_result = _parse_result_for(pdf_path)
+    parser = FakeDoclingParser(parse_result)
+
+    result = orch._run_docling_in_batches(parser, pdf_path, page_batch_size=100, total_pages=1)
+
+    assert parser.parse_calls == 1
+    assert parser.parse_page_ranges == [(1, 1)]
+    assert parser.parse_carry_states == [None]  # first (only) batch has no prior carry state
+    assert result.page_count == 1
+    assert len(result.elements) == len(parse_result.elements)
+    assert result.page_confidence == parse_result.page_confidence
+
+
+def test_run_docling_in_batches_splits_into_correct_page_windows(tmp_path: Path) -> None:
+    """5 pages, batch size 2 -> 3 batches: (1,2), (3,4), (5,5) — the last
+    (possibly short) batch is NOT padded/rounded, and every batch after the
+    first receives the previous batch's `carry_state` (not `None`)."""
+    pdf_path = tmp_path / "multi.pdf"
+    _write_multi_page_pdf(pdf_path, 5)
+
+    class SequencedFakeDoclingParser(FakeDoclingParser):
+        def __init__(self) -> None:
+            super().__init__(_result_for_page(1))
+
+        def parse(
+            self,
+            pdf_path: Any,
+            *,
+            page_range: tuple[int, int] | None = None,
+            carry_state: Any = None,
+        ) -> DoclingParseResult:
+            self.parse_calls += 1
+            self.parse_page_ranges.append(page_range)
+            self.parse_carry_states.append(carry_state)
+            assert page_range is not None
+            return _result_for_page(page_range[1])
+
+    parser = SequencedFakeDoclingParser()
+
+    result = orch._run_docling_in_batches(parser, pdf_path, page_batch_size=2, total_pages=5)
+
+    assert parser.parse_calls == 3
+    assert parser.parse_page_ranges == [(1, 2), (3, 4), (5, 5)]
+    # First batch has no prior carry state; every later batch is threaded
+    # the previous batch's returned carry_state (not None, not reset).
+    assert parser.parse_carry_states[0] is None
+    assert all(state is not None for state in parser.parse_carry_states[1:])
+    assert result.page_count == 5
+    # 3 batches -> 3 elements merged (one per fake per-batch result).
+    assert len(result.elements) == 3
+    assert sorted(result.page_confidence) == [2, 4, 5]
+
+
+def test_run_docling_in_batches_rejects_non_positive_batch_size() -> None:
+    parser = FakeDoclingParser(_parse_result_for(Path("x.pdf")))
+    with pytest.raises(ValueError, match="page_batch_size"):
+        orch._run_docling_in_batches(parser, "x.pdf", page_batch_size=0, total_pages=5)
+
+
+def test_run_docling_in_batches_rejects_non_positive_total_pages() -> None:
+    parser = FakeDoclingParser(_parse_result_for(Path("x.pdf")))
+    with pytest.raises(ValueError, match="total_pages"):
+        orch._run_docling_in_batches(parser, "x.pdf", page_batch_size=5, total_pages=0)
+
+
+def test_run_ingestion_pipeline_uses_configured_page_batch_size(
+    pipeline_env: dict[str, Any],
+) -> None:
+    """`INGESTION_PAGE_BATCH_SIZE` is read from `settings`, not hardcoded —
+    a batch size of 1 against the 1-page fixture still yields exactly one
+    (1, 1) batch (same as the default-settings case), proving the value is
+    actually threaded from `Settings` into `_run_docling_in_batches`."""
+    orch.run_ingestion_pipeline(
+        pipeline_env["db"],
+        pipeline_env["storage"],
+        _settings(INGESTION_PAGE_BATCH_SIZE=1),
+        document_id=pipeline_env["document"].id,
+        pdf_path=pipeline_env["pdf_path"],
+        docling_parser=pipeline_env["docling_parser"],
+        paddle_client=pipeline_env["paddle_client"],
+        qdrant_client=pipeline_env["qdrant_client"],
+        dense_model=FakeDenseModel(),
+        sparse_model=FakeSparseModel(),
+    )
+
+    assert pipeline_env["docling_parser"].parse_page_ranges == [(1, 1)]

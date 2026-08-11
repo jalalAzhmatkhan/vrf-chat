@@ -168,6 +168,36 @@ class Settings(BaseSettings):
     # WAJIB true in dev (RTX 3060 6GB) — Docling and PaddleOCR-VL must never
     # be GPU-resident simultaneously. See 02-ingestion-pipeline.md §4.
     DOCLING_UNLOAD_BEFORE_PADDLE_STAGE: bool = True
+    # INGESTION_PAGE_BATCH_SIZE: [Backend Engineer, 2026-08-11, page-range
+    # batching OOM fix] Added after a real WSL kernel oom-killer event
+    # ingesting the 567-page "Zeggo VRV III" document as a single
+    # `converter.convert()` call (~12.5GB resident on a 13GB WSL VM, 3
+    # failures in a row, always within 1-2 minutes — i.e. during this Stage,
+    # not a later one). The 5 documents that succeeded unbatched range
+    # 286-403 pages; only the 567-page one failed — a clear page-count-
+    # driven OOM, not an environment fluke. `DoclingParser.parse()` now
+    # accepts `page_range` (Docling's own native support — verified to only
+    # `load_page()` pages inside that window, not the whole PDF, see
+    # `docling/backend/docling_parse_backend.py`), and
+    # `run_ingestion_pipeline` (`app/ingestion/orchestrator.py`,
+    # `_run_docling_in_batches`) drives Stage 2 in this many-page windows,
+    # merging results via `ParseCarryState` so the merged output is
+    # semantically identical to one unbatched call (same `local_id`
+    # sequence/`section_path`/icon-parent fallback chain — see
+    # `docling_parser.py` `ParseCarryState` docstring). Default 100: well
+    # below even the SMALLEST known-safe whole-document run (286 pages, not
+    # merely below the 403-page one) for real margin — at a roughly linear
+    # memory/page-count relationship this bounds Stage 2's own peak resident
+    # memory to roughly (100/567) of the ~12.5GB observed at failure, while
+    # keeping the batch count small (<=6 for the largest 567-page document)
+    # so repeated per-batch overhead stays modest (the converter/its models
+    # stay loaded across batches — only `unload()`ed once, after the whole
+    # document, unchanged from before this fix; only the transient per-call
+    # `ConversionResult`/`DoclingDocument` object graph is released between
+    # batches). NOT verified against a real 567-page run in this environment
+    # (WSL was unstable throughout this task) — see STATUS REPORT for what
+    # IS/ISN'T verified.
+    INGESTION_PAGE_BATCH_SIZE: int = 100
 
     # ---- Ingestion Stage 3 — deterministic cascade trigger rules, see
     # Documentation/system-design/02-ingestion-pipeline.md §3 and

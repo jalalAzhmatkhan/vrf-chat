@@ -46,7 +46,13 @@ from app.ingestion.canonical_store import (
 )
 from app.ingestion.cascade_trigger import build_cascade_plan
 from app.ingestion.chunker import ChunkableElement, build_chunks, build_entity_chunks, store_chunks
-from app.ingestion.docling_parser import DoclingParser
+from app.ingestion.docling_parser import (
+    DoclingParser,
+    DoclingParseResult,
+    ElementDraft,
+    PageConfidence,
+    ParseCarryState,
+)
 from app.ingestion.embedder import (
     DenseEmbeddingModel,
     FastEmbedDenseModel,
@@ -90,6 +96,86 @@ class OrchestratorResult:
 
 def _document_source_key(document_id: int) -> str:
     return f"documents/{document_id}/source.pdf"
+
+
+def _run_docling_in_batches(
+    parser: DoclingParser,
+    pdf_path: str | Path,
+    *,
+    page_batch_size: int,
+    total_pages: int,
+) -> DoclingParseResult:
+    """Stage 2 (Docling), driven in `page_batch_size`-page windows via
+    Docling's own `page_range` support, instead of one `parser.parse()`
+    call over the whole document — see `docling_parser.py` module
+    docstring/`ParseCarryState` for the full rationale.
+
+    Added 2026-08-11 after a real WSL kernel oom-killer event (~12.5GB
+    resident on a 13GB WSL VM) ingesting the 567-page "Zeggo VRV III"
+    document as a single `converter.convert()` call, 3 failures in a row,
+    always within 1-2 minutes of starting — i.e. during this stage, not a
+    later one. 5 other documents (286-403 pages) processed unbatched
+    without incident, so this bounds Docling's OWN per-conversion memory to
+    O(batch_size pages) instead of O(total_pages), which is the specific
+    thing that scaled with the failing document's page count.
+
+    `total_pages` is expected to come from Stage 1's native probe
+    (`probe_document(pdf_path).page_count`, already computed cheaply via
+    PyMuPDF before this stage runs in `run_ingestion_pipeline` below) rather
+    than re-derived from Docling itself, since the whole point is to never
+    ask Docling to look at the full document in one call.
+
+    Returns ONE merged `DoclingParseResult` that is semantically identical
+    to what a single unbatched `parser.parse(pdf_path)` call would have
+    produced (same `local_id` sequence, `section_path` breadcrumbs, and
+    icon->text parent fallback across the batch boundary — proven by
+    `tests/unit/test_ingestion_docling_parser.py
+    test_batched_parse_matches_single_pass_*`) — every stage downstream of
+    this function (cascade_trigger, canonical_store, kg_candidate_extractor,
+    chunker) is unmodified by this change and receives that merged result
+    exactly as it always has.
+    """
+    if page_batch_size <= 0:
+        raise ValueError(f"page_batch_size must be positive, got {page_batch_size}")
+    if total_pages <= 0:
+        raise ValueError(f"total_pages must be positive, got {total_pages}")
+
+    batch_starts = list(range(1, total_pages + 1, page_batch_size))
+    total_batches = len(batch_starts)
+
+    all_elements: list[ElementDraft] = []
+    page_confidence: dict[int, PageConfidence] = {}
+    carry_state: ParseCarryState | None = None
+
+    for batch_index, start in enumerate(batch_starts, start=1):
+        end = min(start + page_batch_size - 1, total_pages)
+        logger.info(
+            "orchestrator.docling_batch_start",
+            extra={
+                "page_range_start": start,
+                "page_range_end": end,
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+            },
+        )
+        batch_result = parser.parse(pdf_path, page_range=(start, end), carry_state=carry_state)
+        all_elements.extend(batch_result.elements)
+        page_confidence.update(batch_result.page_confidence)
+        carry_state = batch_result.carry_state
+        logger.info(
+            "orchestrator.docling_batch_done",
+            extra={
+                "page_range_start": start,
+                "page_range_end": end,
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+                "elements_so_far": len(all_elements),
+            },
+        )
+
+    return DoclingParseResult(
+        elements=all_elements, page_confidence=page_confidence, page_count=total_pages
+    )
 
 
 class _StageRunner:
@@ -165,7 +251,21 @@ def run_ingestion_pipeline(
         parser = docling_parser or DoclingParser(device=settings.DOCLING_DEVICE)
 
         def _run_docling() -> Any:
-            result = parser.parse(pdf_path)
+            # [2026-08-11 OOM fix] page-range batching, see
+            # `_run_docling_in_batches` docstring above — `parser.unload()`
+            # still happens exactly once, after ALL batches finish (same
+            # contract as before: `DOCLING_UNLOAD_BEFORE_PADDLE_STAGE`,
+            # `02-ingestion-pipeline.md` §4). The converter/its models stay
+            # loaded and are reused across batches (no per-batch reload
+            # cost) — only the per-batch `ConversionResult`/`DoclingDocument`
+            # object graph is released between batches, inside
+            # `DoclingParser.parse()` itself.
+            result = _run_docling_in_batches(
+                parser,
+                pdf_path,
+                page_batch_size=settings.INGESTION_PAGE_BATCH_SIZE,
+                total_pages=probe.page_count,
+            )
             parser.unload()
             return result
 

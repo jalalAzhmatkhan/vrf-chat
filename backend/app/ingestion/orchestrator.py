@@ -4,14 +4,19 @@
 
 Wires the full pipeline built across I1.1-I1.9 for a single document:
 
-    Stage 1 native_probe -> Stage 2 docling -> Stage 3 cascade_trigger
-    -> Stage 4 paddle_cascade -> canonical_store (+ kg_candidate)
-    -> chunking -> embedding
+    Stage 1 native_probe -> [per page-range batch: Stage 2 docling ->
+    Stage 3 cascade_trigger -> Stage 4 paddle_cascade -> canonical_store
+    (+ kg_candidate)] -> chunking -> embedding
 
 Each of the 6 `INGESTION_STAGES` (`app/db/models/ingestion_jobs.py`) gets
-its own `ingestion_jobs` row (queued -> running -> done/failed,
-`stage_metrics.duration_ms`), independent of Celery task boundaries, so
-progress/failure is visible per-stage in Postgres even mid-run.
+its own `ingestion_jobs` row per invocation (queued -> running ->
+done/failed, `stage_metrics.duration_ms`), independent of Celery task
+boundaries, so progress/failure is visible per-stage in Postgres even
+mid-run. **[2026-08-11, page-range batching round 2]** `docling`/
+`paddle_cascade`/`kg_candidate` now run ONCE PER BATCH (see
+`_run_batched_pipeline` below) rather than once per document — for an
+N-batch document there are N rows for each of those three stages, not one;
+`native_probe`/`chunking`/`embedding` remain once-per-document (unchanged).
 
 All heavy/GPU components (`DoclingParser`, the PaddleOCR-VL client, the
 Qdrant client, the embedding models) are **dependency-injected** with
@@ -19,17 +24,45 @@ real-from-settings defaults — this is what makes `run_ingestion_pipeline`
 itself fully unit-testable (fakes injected for every heavy component) while
 still being the actual code path a real Celery task
 (`app/workers/tasks.py`) calls with real settings-built components.
+
+**[2026-08-11, page-range batching round 2 — real OOM still observed]**
+Round 1 (`ParseCarryState`, `DoclingParser.parse(page_range=...)`) bounded
+ONLY Docling's own per-`convert()` memory — a real run against the actual
+567-page "Zeggo VRV III" document still OOM'd (~12.7GB resident, virtually
+unchanged from the ~12.5GB pre-round-1 baseline), because
+`_run_docling_in_batches` (round 1, now removed) still accumulated every
+batch's `ElementDraft`s into ONE merged `DoclingParseResult` and called
+`store_pages_and_elements` exactly ONCE at the end for the whole document —
+so peak memory was still O(total_pages), just with the specific "Docling's
+internal per-conversion state" contributor now bounded. The dominant
+remaining contributor, per this project's `Session` being configured with
+`expire_on_commit=False` (`app/db/engine.py`), was almost certainly
+thousands of fully-loaded `Element`/`Page` ORM objects accumulating in the
+session's identity map for the entire ingestion run (a `commit()` alone
+does not release them under `expire_on_commit=False`) — see
+`canonical_store.py` module docstring for the fix (`db.expunge()` right
+after each object is no longer needed) and
+`docs/ingestion-page-range-batching.md` §2 (round 2) for the full
+investigation/evidence.
+
+Round 2 restructures the pipeline so **parse -> cascade -> store -> release**
+happens PER BATCH (`_run_batched_pipeline`), so peak memory is genuinely
+O(batch_size pages), not O(total_pages), for both Docling's own state AND
+the SQLAlchemy session's identity map. `chunking`/`embedding` remain
+whole-document (unchanged, not implicated by the evidence — see
+`docs/ingestion-page-range-batching.md` §2 for why).
 """
 
 from __future__ import annotations
 
+import gc
 import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -46,13 +79,7 @@ from app.ingestion.canonical_store import (
 )
 from app.ingestion.cascade_trigger import build_cascade_plan
 from app.ingestion.chunker import ChunkableElement, build_chunks, build_entity_chunks, store_chunks
-from app.ingestion.docling_parser import (
-    DoclingParser,
-    DoclingParseResult,
-    ElementDraft,
-    PageConfidence,
-    ParseCarryState,
-)
+from app.ingestion.docling_parser import DoclingParser, ParseCarryState
 from app.ingestion.embedder import (
     DenseEmbeddingModel,
     FastEmbedDenseModel,
@@ -63,7 +90,7 @@ from app.ingestion.embedder import (
     ensure_collection,
 )
 from app.ingestion.kg_candidate_extractor import extract_kg_candidates
-from app.ingestion.native_probe import probe_document
+from app.ingestion.native_probe import DocumentProbe, probe_document
 from app.ingestion.paddleocr_vl_cascade import (
     PaddleOCRVLClient,
     build_paddleocr_vl_client,
@@ -98,83 +125,175 @@ def _document_source_key(document_id: int) -> str:
     return f"documents/{document_id}/source.pdf"
 
 
-def _run_docling_in_batches(
-    parser: DoclingParser,
-    pdf_path: str | Path,
+@dataclass(slots=True)
+class _BatchPipelineResult:
+    pages_stored: int
+    elements_stored: int
+    cascade_task_count: int
+
+
+def _run_batched_pipeline(
+    db: Session,
+    storage: ObjectStorageClient,
+    settings: Settings,
     *,
-    page_batch_size: int,
-    total_pages: int,
-) -> DoclingParseResult:
-    """Stage 2 (Docling), driven in `page_batch_size`-page windows via
-    Docling's own `page_range` support, instead of one `parser.parse()`
-    call over the whole document — see `docling_parser.py` module
-    docstring/`ParseCarryState` for the full rationale.
+    document: Document,
+    pdf_path: str | Path,
+    probe: DocumentProbe,
+    parser: DoclingParser,
+    stages: _StageRunner,
+    paddle_client: PaddleOCRVLClient | None,
+) -> _BatchPipelineResult:
+    """Stages 2-4 + canonical store + KG candidates, driven in
+    `settings.INGESTION_PAGE_BATCH_SIZE`-page windows: **parse -> cascade ->
+    store -> release**, per batch, so peak memory is O(batch_size pages),
+    not O(total_pages) — see module docstring (2026-08-11, round 2) for the
+    full rationale/evidence this replaced round 1's Docling-only batching.
 
-    Added 2026-08-11 after a real WSL kernel oom-killer event (~12.5GB
-    resident on a 13GB WSL VM) ingesting the 567-page "Zeggo VRV III"
-    document as a single `converter.convert()` call, 3 failures in a row,
-    always within 1-2 minutes of starting — i.e. during this stage, not a
-    later one. 5 other documents (286-403 pages) processed unbatched
-    without incident, so this bounds Docling's OWN per-conversion memory to
-    O(batch_size pages) instead of O(total_pages), which is the specific
-    thing that scaled with the failing document's page count.
+    `ParseCarryState` (`docling_parser.py`) and `local_id_to_db_id`
+    (`canonical_store.py`) are both threaded across every batch call in this
+    loop so the final persisted result is identical to what a single
+    unbatched run would have produced — same `local_id` sequence/
+    `section_path`/icon-parent fallback chain (`ParseCarryState`), AND
+    correct `elements.parent_id` FKs even when a child element's parent was
+    stored in an EARLIER batch (`local_id_to_db_id`). See
+    `tests/unit/test_ingestion_orchestrator.py
+    test_run_ingestion_pipeline_batched_matches_unbatched_*` for the
+    end-to-end equivalence proof (analogous to, but at a higher level than,
+    `test_ingestion_docling_parser.py`'s round-1 equivalence tests).
 
-    `total_pages` is expected to come from Stage 1's native probe
-    (`probe_document(pdf_path).page_count`, already computed cheaply via
-    PyMuPDF before this stage runs in `run_ingestion_pipeline` below) rather
-    than re-derived from Docling itself, since the whole point is to never
-    ask Docling to look at the full document in one call.
-
-    Returns ONE merged `DoclingParseResult` that is semantically identical
-    to what a single unbatched `parser.parse(pdf_path)` call would have
-    produced (same `local_id` sequence, `section_path` breadcrumbs, and
-    icon->text parent fallback across the batch boundary — proven by
-    `tests/unit/test_ingestion_docling_parser.py
-    test_batched_parse_matches_single_pass_*`) — every stage downstream of
-    this function (cascade_trigger, canonical_store, kg_candidate_extractor,
-    chunker) is unmodified by this change and receives that merged result
-    exactly as it always has.
+    Docling is `unload()`ed after EVERY batch (not just once at the end,
+    unlike round 1) — this is what makes `require_docling_unloaded_before_
+    paddle_stage` (`02-ingestion-pipeline.md` §4, WAJIB for the `local`
+    PaddleOCR-VL backend) hold at every batch's cascade step, not just once,
+    and is itself part of the O(batch) memory guarantee for Docling's own
+    state. The PaddleOCR-VL client's lifecycle is UNCHANGED (built lazily
+    once, `unload()`ed once, after the whole loop) — it is a thin HTTP
+    client wrapper around a remote/separate service in the supported
+    `remote_api` configuration (`02-ingestion-pipeline.md` §4.0), not a
+    locally-memory-heavy resource in this worker process, so there is no
+    O(document) memory concern to fix there.
     """
+    page_batch_size = settings.INGESTION_PAGE_BATCH_SIZE
     if page_batch_size <= 0:
         raise ValueError(f"page_batch_size must be positive, got {page_batch_size}")
+    total_pages = probe.page_count
     if total_pages <= 0:
         raise ValueError(f"total_pages must be positive, got {total_pages}")
 
     batch_starts = list(range(1, total_pages + 1, page_batch_size))
     total_batches = len(batch_starts)
 
-    all_elements: list[ElementDraft] = []
-    page_confidence: dict[int, PageConfidence] = {}
     carry_state: ParseCarryState | None = None
+    local_id_to_db_id: dict[int, int] = {}
+    paddle_client_instance = paddle_client
+    pages_stored = 0
+    elements_stored = 0
+    cascade_task_count = 0
 
     for batch_index, start in enumerate(batch_starts, start=1):
         end = min(start + page_batch_size - 1, total_pages)
-        logger.info(
-            "orchestrator.docling_batch_start",
-            extra={
-                "page_range_start": start,
-                "page_range_end": end,
-                "batch_index": batch_index,
-                "total_batches": total_batches,
-            },
-        )
-        batch_result = parser.parse(pdf_path, page_range=(start, end), carry_state=carry_state)
-        all_elements.extend(batch_result.elements)
-        page_confidence.update(batch_result.page_confidence)
-        carry_state = batch_result.carry_state
-        logger.info(
-            "orchestrator.docling_batch_done",
-            extra={
-                "page_range_start": start,
-                "page_range_end": end,
-                "batch_index": batch_index,
-                "total_batches": total_batches,
-                "elements_so_far": len(all_elements),
-            },
+        batch_log_extra = {
+            "page_range_start": start,
+            "page_range_end": end,
+            "batch_index": batch_index,
+            "total_batches": total_batches,
+        }
+        logger.info("orchestrator.batch_start", extra=batch_log_extra)
+
+        def _parse_batch(
+            start: int = start, end: int = end, carry_state: ParseCarryState | None = carry_state
+        ) -> Any:
+            result = parser.parse(pdf_path, page_range=(start, end), carry_state=carry_state)
+            # [2026-08-11, round 2] unload EVERY batch (not just once at the
+            # end, unlike round 1) — see function docstring.
+            parser.unload()
+            return result
+
+        batch_parse_result = stages.run(STAGE_DOCLING, _parse_batch)
+        carry_state = batch_parse_result.carry_state
+
+        batch_plan = build_cascade_plan(
+            batch_parse_result,
+            probe,
+            threshold_table=settings.THRESHOLD_TABLE,
+            threshold_text=settings.THRESHOLD_TEXT,
         )
 
-    return DoclingParseResult(
-        elements=all_elements, page_confidence=page_confidence, page_count=total_pages
+        def _run_batch_cascade(
+            batch_plan: Any = batch_plan, batch_parse_result: Any = batch_parse_result
+        ) -> Any:
+            nonlocal paddle_client_instance
+            validate_paddleocr_vl_config_or_raise(settings)
+            require_docling_unloaded_before_paddle_stage(parser, settings)
+            if paddle_client_instance is None:
+                paddle_client_instance = build_paddleocr_vl_client(settings)
+            elements_by_local_id = {e.local_id: e for e in batch_parse_result.elements}
+            return run_cascade_stage(
+                batch_plan,
+                pdf_path,
+                paddle_client_instance,
+                elements_by_local_id=elements_by_local_id,
+            )
+
+        batch_cascade_results = stages.run(STAGE_PADDLE_CASCADE, _run_batch_cascade)
+        cascade_task_count += len(batch_cascade_results)
+
+        def _run_batch_kg(
+            batch_parse_result: Any = batch_parse_result,
+            batch_cascade_results: Any = batch_cascade_results,
+        ) -> Any:
+            return extract_kg_candidates(
+                batch_parse_result, document.filename, cascade_results=batch_cascade_results
+            )
+
+        batch_kg_candidates = stages.run(STAGE_KG_CANDIDATE, _run_batch_kg)
+
+        batch_summary = store_pages_and_elements(
+            db,
+            storage,
+            document=document,
+            pdf_path=pdf_path,
+            parse_result=batch_parse_result,
+            cascade_results=batch_cascade_results,
+            kg_candidates=batch_kg_candidates,
+            page_range=(start, end),
+            local_id_to_db_id=local_id_to_db_id,
+        )
+        pages_stored += batch_summary.pages_stored
+        elements_stored += batch_summary.elements_stored
+
+        logger.info(
+            "orchestrator.batch_done",
+            extra={**batch_log_extra, "pages_stored_so_far": pages_stored},
+        )
+
+        # [2026-08-11, round 2] explicit release of this batch's transient
+        # Python objects, matching the "parse -> cascade -> store -> release"
+        # instruction literally — `store_pages_and_elements` already
+        # `db.expunge()`s every ORM object it created (the dominant real
+        # fix, see canonical_store.py module docstring); this `gc.collect()`
+        # is the cheap, harmless complement for everything else (cascade
+        # results holding VLM description strings, the batch's `ElementDraft`
+        # list, etc.), same reasoning as `DoclingParser.parse()`'s own
+        # unconditional release.
+        del batch_parse_result, batch_plan
+        del batch_cascade_results, batch_kg_candidates, batch_summary
+        gc.collect()
+
+    # `batch_starts` always has >=1 entry (`total_pages`/`page_batch_size`
+    # are both validated positive above), so the loop above always ran at
+    # least once — and every iteration's `_run_batch_cascade` either uses
+    # the injected client or lazily builds one — so `paddle_client_instance`
+    # is guaranteed non-None here. `cast`, not an `if`/`assert`, expresses
+    # that as a real invariant rather than a runtime branch that could never
+    # actually be taken (an untestable, and therefore misleading, branch).
+    cast(PaddleOCRVLClient, paddle_client_instance).unload()
+
+    return _BatchPipelineResult(
+        pages_stored=pages_stored,
+        elements_stored=elements_stored,
+        cascade_task_count=cascade_task_count,
     )
 
 
@@ -250,62 +369,23 @@ def run_ingestion_pipeline(
 
         parser = docling_parser or DoclingParser(device=settings.DOCLING_DEVICE)
 
-        def _run_docling() -> Any:
-            # [2026-08-11 OOM fix] page-range batching, see
-            # `_run_docling_in_batches` docstring above — `parser.unload()`
-            # still happens exactly once, after ALL batches finish (same
-            # contract as before: `DOCLING_UNLOAD_BEFORE_PADDLE_STAGE`,
-            # `02-ingestion-pipeline.md` §4). The converter/its models stay
-            # loaded and are reused across batches (no per-batch reload
-            # cost) — only the per-batch `ConversionResult`/`DoclingDocument`
-            # object graph is released between batches, inside
-            # `DoclingParser.parse()` itself.
-            result = _run_docling_in_batches(
-                parser,
-                pdf_path,
-                page_batch_size=settings.INGESTION_PAGE_BATCH_SIZE,
-                total_pages=probe.page_count,
-            )
-            parser.unload()
-            return result
-
-        parse_result = stages.run(STAGE_DOCLING, _run_docling)
-
-        plan = build_cascade_plan(
-            parse_result,
-            probe,
-            threshold_table=settings.THRESHOLD_TABLE,
-            threshold_text=settings.THRESHOLD_TEXT,
-        )
-
-        def _run_paddle_cascade() -> Any:
-            validate_paddleocr_vl_config_or_raise(settings)
-            require_docling_unloaded_before_paddle_stage(parser, settings)
-            client = paddle_client or build_paddleocr_vl_client(settings)
-            elements_by_local_id = {e.local_id: e for e in parse_result.elements}
-            results = run_cascade_stage(
-                plan, pdf_path, client, elements_by_local_id=elements_by_local_id
-            )
-            client.unload()
-            return results
-
-        cascade_results = stages.run(STAGE_PADDLE_CASCADE, _run_paddle_cascade)
-
-        def _run_kg_candidates() -> Any:
-            return extract_kg_candidates(
-                parse_result, document.filename, cascade_results=cascade_results
-            )
-
-        kg_candidates = stages.run(STAGE_KG_CANDIDATE, _run_kg_candidates)
-
-        store_summary = store_pages_and_elements(
+        # [2026-08-11, page-range batching round 2] Stages 2-4 + canonical
+        # store + KG candidates now run per page-range batch (parse ->
+        # cascade -> store -> release) via `_run_batched_pipeline`, instead
+        # of once for the whole document — see module docstring for why
+        # round 1 (Docling-only batching) still OOM'd on the real 567-page
+        # document, and `_run_batched_pipeline`'s own docstring for the
+        # full per-batch contract this replaces.
+        batch_result = _run_batched_pipeline(
             db,
             storage,
+            settings,
             document=document,
             pdf_path=pdf_path,
-            parse_result=parse_result,
-            cascade_results=cascade_results,
-            kg_candidates=kg_candidates,
+            probe=probe,
+            parser=parser,
+            stages=stages,
+            paddle_client=paddle_client,
         )
 
         def _run_chunking() -> Any:
@@ -353,11 +433,11 @@ def run_ingestion_pipeline(
 
     return OrchestratorResult(
         document_id=document_id,
-        pages_stored=store_summary.pages_stored,
-        elements_stored=store_summary.elements_stored,
+        pages_stored=batch_result.pages_stored,
+        elements_stored=batch_result.elements_stored,
         chunks_stored=len(chunk_rows),
         chunks_embedded=embedded_count,
-        cascade_task_count=len(cascade_results),
+        cascade_task_count=batch_result.cascade_task_count,
     )
 
 

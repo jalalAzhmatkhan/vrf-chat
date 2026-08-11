@@ -578,3 +578,206 @@ def test_store_pages_and_elements_kg_candidates_default_empty(tmp_path: Path) ->
     element = db.execute(select(Element)).scalar_one()
     assert element.kg_candidate_entities == []
     assert element.kg_candidate_relations == []
+
+
+# ---------------------------------------------------------------------------
+# page-range batching (2026-08-11, round 2): `page_range`/`local_id_to_db_id`
+# — see module docstring "round 2" note for the full rationale (real OOM
+# still observed after round 1's Docling-only batching; the fix here is
+# calling this function once per page-range batch instead of once per
+# document, with `local_id_to_db_id` carried across those calls).
+# ---------------------------------------------------------------------------
+
+
+def test_store_pages_and_elements_page_range_restricts_processed_pages(tmp_path: Path) -> None:
+    """Only pages inside `page_range` are processed — pages outside it are
+    left completely untouched (not even queried/skipped-counted), matching
+    what a caller doing per-batch calls needs (each call only "owns" its
+    own batch's page numbers)."""
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["Page one.", "Page two.", "Page three."])
+    db = _make_session()
+    document = _basic_document(db, page_count=3)
+    storage = FakeObjectStorageClient()
+    parse_result = DoclingParseResult(
+        elements=[
+            _element(local_id=1, page_number=1, text="Page one."),
+            _element(local_id=2, page_number=2, text="Page two."),
+            _element(local_id=3, page_number=3, text="Page three."),
+        ],
+        page_confidence={
+            1: _page_confidence(1),
+            2: _page_confidence(2),
+            3: _page_confidence(3),
+        },
+        page_count=3,
+    )
+
+    summary = cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=parse_result,
+        page_range=(2, 2),
+    )
+
+    assert summary.pages_stored == 1
+    assert summary.elements_stored == 1
+    pages = db.execute(select(Page)).scalars().all()
+    assert len(pages) == 1
+    assert pages[0].page_number == 2
+    element = db.execute(select(Element)).scalar_one()
+    assert element.text == "Page two."
+
+
+def test_store_pages_and_elements_local_id_to_db_id_carries_parent_across_calls(
+    tmp_path: Path,
+) -> None:
+    """The exact cross-batch scenario `_run_batched_pipeline` relies on: a
+    child element's `parent_local_id` refers to an element stored in an
+    EARLIER call — passing the SAME `local_id_to_db_id` dict into both calls
+    (as the orchestrator does across batches) must resolve `parent_id`
+    correctly; using two SEPARATE (unshared) dicts must NOT (regression
+    guard proving the carry is actually load-bearing, not incidental)."""
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["Press the button icon.", "Continued icon legend."])
+    db = _make_session()
+    document = _basic_document(db, page_count=2)
+    storage = FakeObjectStorageClient()
+
+    parent_only = DoclingParseResult(
+        elements=[_element(local_id=1, page_number=1, text="Press the button icon.")],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+    # `parent_local_id=1` refers to local_id 1 from the FIRST call's
+    # DoclingParseResult, not this one's (its own elements start at
+    # local_id 2 — matching how `ParseCarryState.next_local_id` keeps
+    # local_ids globally unique/monotonic across real batches).
+    child_only = DoclingParseResult(
+        elements=[
+            _element(
+                local_id=2, page_number=2, element_type="icon", text=None, parent_local_id=1
+            )
+        ],
+        page_confidence={2: _page_confidence(2)},
+        page_count=2,
+    )
+
+    shared_local_id_to_db_id: dict[int, int] = {}
+    cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=parent_only,
+        page_range=(1, 1),
+        local_id_to_db_id=shared_local_id_to_db_id,
+    )
+    cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=child_only,
+        page_range=(2, 2),
+        local_id_to_db_id=shared_local_id_to_db_id,
+    )
+
+    rows = db.execute(select(Element).order_by(Element.id)).scalars().all()
+    parent_row, child_row = rows
+    assert child_row.parent_id == parent_row.id  # correctly resolved cross-call
+
+
+def test_store_pages_and_elements_without_shared_dict_orphans_cross_call_parent(
+    tmp_path: Path,
+) -> None:
+    """Negative counterpart to the test above: WITHOUT carrying
+    `local_id_to_db_id` across the two calls (a fresh, unshared dict each
+    time — i.e. what happens if a caller forgets to carry it, or the
+    pre-2026-08-11 behavior for a caller not passing it at all), the
+    cross-call parent link canNOT be resolved and `parent_id` is `NULL`
+    instead — this is what proves the carry in the test above is load-
+    bearing, not a coincidence."""
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["Press the button icon.", "Continued icon legend."])
+    db = _make_session()
+    document = _basic_document(db, page_count=2)
+    storage = FakeObjectStorageClient()
+
+    parent_only = DoclingParseResult(
+        elements=[_element(local_id=1, page_number=1, text="Press the button icon.")],
+        page_confidence={1: _page_confidence(1)},
+        page_count=1,
+    )
+    child_only = DoclingParseResult(
+        elements=[
+            _element(
+                local_id=2, page_number=2, element_type="icon", text=None, parent_local_id=1
+            )
+        ],
+        page_confidence={2: _page_confidence(2)},
+        page_count=2,
+    )
+
+    cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=parent_only,
+        page_range=(1, 1),
+        # no local_id_to_db_id -> fresh, discarded dict (old default behavior)
+    )
+    cs.store_pages_and_elements(
+        db,
+        storage,
+        document=document,
+        pdf_path=pdf_path,
+        parse_result=child_only,
+        page_range=(2, 2),
+        # no local_id_to_db_id -> fresh dict again, has no memory of local_id 1
+    )
+
+    rows = db.execute(select(Element).order_by(Element.id)).scalars().all()
+    _parent_row, child_row = rows
+    assert child_row.parent_id is None
+
+
+def test_store_pages_and_elements_expunges_created_objects_from_session(tmp_path: Path) -> None:
+    """[2026-08-11, round 2 memory fix] Regression guard for the actual
+    fix: `Page`/`Element` ORM objects created by this call must not remain
+    resident in the session's identity map afterward — this is what makes
+    peak memory O(batch) instead of O(document) under this project's
+    `expire_on_commit=False` session config (`app/db/engine.py`; a plain
+    `db.commit()` alone would NOT release them, see module docstring). Only
+    `document` (never expunged — the caller keeps using it for the rest of
+    the ingestion run) should remain in the identity map afterward."""
+    pdf_path = tmp_path / "manual.pdf"
+    _write_pdf(pdf_path, ["Press the button icon.", "Continued icon legend."])
+    db = _make_session()
+    document = _basic_document(db, page_count=2)
+    storage = FakeObjectStorageClient()
+    parse_result = DoclingParseResult(
+        elements=[
+            _element(local_id=1, page_number=1, text="Press the button icon."),
+            _element(
+                local_id=2,
+                page_number=2,
+                element_type="icon",
+                text=None,
+                parent_local_id=1,
+            ),
+        ],
+        page_confidence={1: _page_confidence(1), 2: _page_confidence(2)},
+        page_count=2,
+    )
+
+    cs.store_pages_and_elements(
+        db, storage, document=document, pdf_path=pdf_path, parse_result=parse_result
+    )
+
+    identity_map_classes = {type(state.object) for state in db.identity_map.all_states()}
+    assert identity_map_classes == {Document}
+    assert document in db  # still attached — this function must not expunge it

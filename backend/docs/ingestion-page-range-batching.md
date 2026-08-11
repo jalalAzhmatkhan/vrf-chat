@@ -7,6 +7,11 @@ Not a `Documentation/system-design/` doc (out of Backend Engineer's write scope)
 record. See `### DIRECT MESSAGE -> System Analyst` in the STATUS REPORT for
 this task.
 
+**Two rounds in this doc**: round 1 (Docling-only batching) was verified
+against the real 567-page document and **still OOM'd** — see §2. Round 2
+(this doc's current state) restructures the pipeline further; §6 records
+what IS/ISN'T verified for round 2 given continued environment instability.
+
 ## 1. Problem (hard evidence, not a hypothesis)
 
 WSL kernel log, repeated 3x in a row, always within 1-2 minutes of starting:
@@ -27,169 +32,290 @@ pages, 39.7MB**. Clear page-count correlation, not an environment fluke:
 
 The orchestrator's stage sequence (`app/ingestion/orchestrator.py`:
 `native_probe` -> `docling` -> `paddle_cascade` -> ...) and the "within 1-2
-minutes" timing both point at **Stage 2 (Docling)** as the OOM source, not
-Stage 1 (PyMuPDF-only, lightweight, would fail near-instantly if at all) or
-any later stage.
+minutes" timing both pointed at **Stage 2 (Docling)** as the OOM source —
+this was round 1's working hypothesis.
 
-## 2. Root cause hypothesis
+## 2. Round 1 shipped, verified against real hardware, still OOM'd
 
-Docling's `DocumentConverter.convert()` builds the *entire* `DoclingDocument`
-object graph (per-page layout/table-model outputs, rendered page images used
-internally by the pipeline, etc.) for **all** requested pages before
-returning — i.e. memory scales with the number of pages given to a *single*
-`convert()` call. A 567-page single call therefore holds ~1.4x the object
-graph a 403-page call holds, which was already presumably close to the WSL
-VM's ceiling.
+Round 1 (`ParseCarryState`, `DoclingParser.parse(page_range=...)`,
+`_run_docling_in_batches` merging every batch's `ElementDraft`s into ONE
+`DoclingParseResult`, `store_pages_and_elements` still called ONCE for the
+whole document) was committed and then **actually tested against the real
+567-page document** — unlike everything else in this doc, this is a real
+measurement, not a hypothesis:
 
-This is consistent with Docling's own architecture (confirmed by reading
-`docling/backend/docling_parse_backend.py`: `page_range` restricts which
-pages are `load_page()`d at all — Docling does NOT eagerly load the whole
-PDF regardless of `page_range`), which is exactly what page-range batching
-exploits.
+```
+Out of memory: Killed process 7354 (python)
+anon-rss: 12,722,548 kB   (~12.7 GB)
+```
 
-## 3. Decision: in-process page-range batching (not subprocess-per-batch)
+**Virtually unchanged from the ~12.5GB round-1-absent baseline.** However,
+round 1 was NOT wasted work — the run survived ~10 minutes and reached real
+OCR processing (78 log lines vs. 6 lines in the pre-round-1 attempts that
+died in 1-2 minutes), confirming Docling's own per-`convert()` memory WAS
+genuinely bounded by page-range batching. The remaining OOM has a different,
+independent root cause.
 
-Two options were evaluated, per the task brief:
+**Root cause, round 2**: `_run_docling_in_batches` (round 1) still
+accumulated every batch's `ElementDraft`s into ONE merged `DoclingParseResult`
+and called `store_pages_and_elements` exactly ONCE at the end for the whole
+document — so peak memory was still **O(total_pages)**, just with the
+specific "Docling's internal per-conversion state" contributor now bounded.
+**Honesty caveat up front**: the diagnosis below is from reading source
+(`app/db/engine.py`, SQLAlchemy's documented behavior) plus general
+knowledge of a well-known SQLAlchemy footgun class ("long loop of
+`add()`+`commit()` without periodic `expunge()`/session reset grows
+unbounded") — NOT from a memory profiler (`tracemalloc`/`memory_profiler`)
+run against this specific code, because WSL was not available to run one.
+Treat it as the best available diagnosis, not a confirmed root cause.
 
-| Option | Description | Decision |
-|---|---|---|
-| A. In-process batching + explicit release | Same `DoclingParser`/converter instance, called repeatedly with `page_range=(start, end)` windows; `del` the per-call `ConversionResult`/`DoclingDocument` + `gc.collect()` (+ `torch.cuda.empty_cache()` if CUDA) after every call | **Chosen** |
-| B. Subprocess-per-batch | Spawn a fresh OS process per batch, hard OS-level memory isolation | Rejected (for this pass) |
+The leading candidate: this project's SQLAlchemy `Session` is configured
+with **`expire_on_commit=False`** (`app/db/engine.py`) — meaning a
+`db.commit()` alone does **not** release previously-loaded objects'
+attribute state, and separately, ORM instances (via their `InstanceState`)
+are known to commonly form reference cycles that plain CPython refcounting
+cannot reclaim without an actual garbage-collector cycle-detection pass —
+`store_pages_and_elements` never called `gc.collect()` at all internally
+(round 1's per-batch `gc.collect()` lived at the ORCHESTRATOR level, and in
+round 1's design storage was still a single whole-document call, so that
+per-batch collection point never applied to it either). Combined, thousands
+of `Page`/`Element` ORM objects per page/element — each fully loaded with
+`text`/`bbox`/`kg_candidate_entities`/`kg_candidate_relations` jsonb
+payloads — plausibly stayed reachable (via the session's identity map
+and/or uncollected cycles) for the rest of the ingestion run even after
+being durably committed to Postgres and never needed again as Python
+objects.
 
-**Why A, not B:**
+This is at least consistent with round 1's own numbers: Docling's
+contribution was bounded (10 minutes of real progress vs. 1-2 minutes
+before), but total peak memory barely moved — something else large and
+document-scoped was still there. The fix in §3.2 (explicit `db.expunge()` +
+per-batch `gc.collect()`) directly targets this candidate regardless of
+which exact mechanism (weak-ref identity map vs. uncollected cycles) turns
+out to be the precise cause — both are addressed by the same fix.
 
-1. The evidence (§2) implicates memory scaling with *pages given to one
-   `convert()` call*, not *repeated calls leaking/accumulating across many
-   calls to the same converter*. These are different failure modes — A
-   directly addresses the one we have evidence for.
-2. B adds real operational complexity: process spawn overhead per batch,
-   `DoclingParseResult` (de)serialization across a process boundary (fine —
-   it's plain dataclasses — but non-trivial to wire inside a Celery task),
-   and either reloading Docling's models every batch (expensive: model
-   init is the single most expensive one-time cost in Stage 2) or keeping a
-   long-lived subprocess warm across batches (which reintroduces the same
-   "does memory accumulate across repeated calls in one process" question B
-   was meant to sidestep).
-3. Consistent with this project's stated complexity philosophy
-   (`02-ingestion-pipeline.md` §4: "tambah kompleksitas hanya kalau
-   terbukti perlu" / evaluation-driven escalation) — A is the simpler fix
-   that directly targets the evidenced root cause.
+## 3. Round 2: parse -> cascade -> store -> release, PER BATCH
 
-**Escalation path, if A later proves insufficient**: if a real batched run
-still OOMs (i.e. per-call/per-batch memory doesn't actually get released
-between batches, contradicting the hypothesis in §2), subprocess-per-batch
-(Option B) is the documented next step — the `_run_docling_in_batches`
-helper (`app/ingestion/orchestrator.py`) is the single call site that would
-need to change (swap the in-process `parser.parse(page_range=...)` call for
-a subprocess dispatch); nothing downstream would need to change, since it
-already only sees the final merged `DoclingParseResult`.
+Round 2 restructures `app/ingestion/orchestrator.py` so Stages 2-4 +
+canonical store + KG candidates (`_run_batched_pipeline`, replacing round
+1's `_run_docling_in_batches`) run **once per page-range batch**, not once
+per document:
 
-## 4. What changed
+```
+for each batch:
+    parse (Docling, page_range=(start,end), carry_state=<from previous batch>)
+    -> unload Docling (every batch now, not just once — see below)
+    build cascade plan (this batch's elements only)
+    -> run PaddleOCR-VL cascade (this batch's tasks only)
+    -> extract KG candidates (this batch's elements only)
+    -> store_pages_and_elements(page_range=(start,end), local_id_to_db_id=<carried>)
+       -> db.expunge() every Page/Element object once no longer needed
+    -> del batch-local Python objects, gc.collect()
+```
 
-- `app/ingestion/docling_parser.py`:
-  - `DoclingParser.parse()` accepts optional `page_range: tuple[int, int]`
-    (forwarded verbatim to Docling's native `convert(page_range=...)`) and
-    `carry_state: ParseCarryState | None`.
-  - New `ParseCarryState` dataclass (`next_local_id`, `section_path`,
-    `last_text_local_id_doc`) threads the three pieces of whole-document
-    state `map_document_to_elements` needs across batch boundaries so N
-    batched calls produce output identical to one unbatched call — see the
-    module docstring and `ParseCarryState`'s own docstring for the full
-    "why" (this is the part that protects CLAUDE.md §4's inline-icon
-    association requirement across a batch boundary).
-  - `parse()` now unconditionally `del`s the per-call `result`/`doc` +
-    `gc.collect()`s (+ `torch.cuda.empty_cache()` if CUDA) before returning
-    — the actual "explicit memory release between batches" the task asked
-    for. This is unconditional (not gated on batching), so the single
-    unbatched call path benefits too, at negligible cost.
-- `app/ingestion/orchestrator.py`:
-  - New `_run_docling_in_batches()`: slices `[1, total_pages]` (from Stage
-    1's probe) into `INGESTION_PAGE_BATCH_SIZE`-page windows, calls
-    `parser.parse()` once per window threading `ParseCarryState`, and merges
-    all batches' `elements`/`page_confidence` into one `DoclingParseResult`.
-    `parser.unload()` is still called exactly once, after all batches
-    finish — unchanged contract with Stage 4's VRAM-unload requirement.
-  - `run_ingestion_pipeline`'s Stage 2 now calls this instead of a bare
-    `parser.parse(pdf_path)`.
-- `app/core/config.py`: new `INGESTION_PAGE_BATCH_SIZE: int = 100` (see
-  inline comment for the full default-value rationale — short version:
-  well below even the smallest known-safe whole-document run of 286 pages,
-  for real margin, not a bare "just under 403" cutoff).
-- **No changes** to `canonical_store.py`, `cascade_trigger.py`,
-  `kg_candidate_extractor.py`, `chunker.py`, `embedder.py` — all of them
-  already only ever see the final merged `DoclingParseResult`, exactly as
-  before this fix (see reasoning in §5 of the orchestrator/docling_parser
-  module docstrings for why the OOM and its fix are isolated to Stage 2).
+`chunking`/`embedding` remain whole-document, unchanged — see §3.2 for why
+they're not implicated.
 
-## 5. Known, accepted limitation: figure/caption split across a batch boundary
+### 3.1 Two pieces of carried state, both required for correctness
+
+- **`ParseCarryState`** (`docling_parser.py`, round 1, unchanged) — keeps
+  `local_id`/`section_path`/`last_text_local_id_doc` correct across batches
+  at the **parsing** layer.
+- **`local_id_to_db_id`** (`canonical_store.py`, **new in round 2**) — an
+  optional dict, mutated in place by `store_pages_and_elements`, carried by
+  the caller across batch calls. Needed because a child element's
+  `parent_local_id` can point at an element that was stored in an EARLIER
+  batch (the exact SA1.2 document-wide icon-parent fallback scenario) —
+  without carrying this dict, `store_pages_and_elements` would look up that
+  `parent_local_id` in a dict that only knows about the CURRENT batch's
+  elements, resolve to nothing, and silently write `parent_id=NULL` instead
+  of the real parent. This is the storage-layer counterpart to what
+  `ParseCarryState` already protects at the parsing layer — **both are
+  required together**; round 1 only had the first.
+
+### 3.2 The other, complementary fix: explicit `db.expunge()`
+
+`store_pages_and_elements` now `db.expunge()`s every `Page`/`Element` ORM
+object as soon as it's no longer needed (its `.id` captured into a plain
+int; any KG-candidate attribute mutation flushed first — `db.expunge()`
+silently drops unflushed pending changes, so the flush must happen first,
+not after). This directly targets the `expire_on_commit=False` accumulation
+identified in §2, independent of whether storage is called once per
+document or once per batch — but calling it once per batch (§3) additionally
+bounds the OTHER previously-O(document) contributors (the batch's own
+`ElementDraft` list, cascade results holding VLM description strings, etc.)
+to O(batch) too, via the `del ...; gc.collect()` at the end of each batch
+iteration in `_run_batched_pipeline`.
+
+**Why `chunking`/`embedding` were NOT changed**: `_load_chunkable_elements`
+does one `SELECT` over the whole document's `elements`, but immediately
+maps every row into a lightweight `ChunkableElement` dataclass (text
+strings, not the full ORM `Element` object with jsonb payloads) and does
+not hold onto the ORM rows themselves beyond that mapping. The `expire_on_
+commit=False` accumulation problem in §2 is specifically about `Element`/
+`Page` ORM instances the session keeps TRACKING as persistent (from
+`db.add()`, never expunged) — `_load_chunkable_elements`'s query results
+are read once and converted, not accumulated as long-lived tracked
+instances the way `store_pages_and_elements` used to. Left unchanged to
+keep this round's blast radius as small as it could be while still fixing
+the evidenced problem.
+
+### 3.3 Docling now unloaded every batch, not just once
+
+Round 1 called `parser.unload()` once, after ALL batches. Round 2 calls it
+after EVERY batch's parse — this is required for `require_docling_
+unloaded_before_paddle_stage` (`02-ingestion-pipeline.md` §4, WAJIB for the
+`local` PaddleOCR-VL backend, still the `Settings` default value even
+though `remote_api` is the actually-deployed configuration per §4.0) to
+hold at every batch's cascade step, not just once — since Docling's
+converter is now re-`_ensure_loaded()`ed at the START of every batch's
+parse (not kept warm across batches), this is also itself part of the
+O(batch) memory guarantee for Docling's own state, not just a guard-
+satisfaction technicality. Trade-off: Docling's model gets reloaded once
+per batch instead of once per document (a few tens of seconds' extra
+overhead total for ~6 batches on the 567-page document) — accepted, since
+this is an async background job with no TTFT-style latency requirement
+(`05-streaming-and-api-contract.md`) and correctness/memory took priority
+per this task's explicit direction.
+
+**Paddle client lifecycle is UNCHANGED** (built lazily once, `unload()`ed
+once, after the whole batch loop) — it's a thin HTTP client wrapper around
+a remote/separate service in the supported `remote_api` configuration
+(`02-ingestion-pipeline.md` §4.0), not a locally-memory-heavy resource in
+`backend-worker-gpu`, so there was no O(document) memory concern to fix
+there.
+
+### 3.4 `ingestion_jobs` stage-tracking granularity changed
+
+`docling`/`paddle_cascade`/`kg_candidate` now get **one `ingestion_jobs`
+row per batch** (not one per document) — for an N-batch document there are
+N rows for each of those three stages, interleaved in batch order (not
+grouped by stage), e.g. for 2 batches: `native_probe, docling(1),
+paddle_cascade(1), kg_candidate(1), docling(2), paddle_cascade(2),
+kg_candidate(2), chunking, embedding`. `native_probe`/`chunking`/
+`embedding` stay at exactly one row each. No schema change needed —
+`ingestion_jobs.stage` was never uniquely constrained per document
+(`app/db/models/ingestion_jobs.py`), so this is compatible with the
+existing table. This is also a net observability improvement: operators
+can now see exactly which batch/stage a long-running or crashed ingestion
+reached, not just "docling: done, paddle_cascade: running".
+
+## 4. Decision (unchanged from round 1): in-process batching, not subprocess-per-batch
+
+Still the right call after round 2's investigation — the remaining OOM
+turned out to be the ORM accumulation (§2), a Python-object-lifecycle issue
+fixable with `db.expunge()`, not evidence that Docling's own in-process
+memory wasn't actually released by round 1's `page_range` batching (the
+"~10 minutes of real progress, 78 log lines" evidence in §2 confirms it
+WAS). Subprocess isolation remains the documented escalation path if a
+*future* real run shows Docling's own per-batch memory still isn't
+released even after round 2 — not needed based on current evidence.
+
+## 5. Known, accepted limitation (unchanged from round 1): figure/caption split across a batch boundary
 
 Docling assigns `self_ref` identifiers (used internally to resolve
 `figure.captions -> caption text item`) **per `convert()` call**. If a
 figure lands on the last page of batch N and its caption lands on the first
-page of batch N+1, batch N's converted document never saw the caption item
-(out of its `page_range`) and batch N+1 never saw the figure item — the link
-is not recoverable after the fact from either batch's output alone.
+page of batch N+1, the link is not recoverable after the fact from either
+batch's output alone. Not mitigated — captions are virtually always
+same-page as their figure in these service manuals, so this is a narrow
+edge case; a real fix (page-overlap + dedup across batches) was judged not
+worth the added complexity. See STATUS REPORT DIRECT MESSAGE to System
+Analyst.
 
-This is **not mitigated** in this pass — captions are virtually always
-same-page as their figure in these service manuals (visual convention), so
-this is a narrow edge case, and a real fix (page-overlap + dedup across
-batches) was judged not worth the added complexity for it. Flagged
-explicitly here rather than silently accepted — see STATUS REPORT for the
-DIRECT MESSAGE to System Analyst about this trade-off.
+## 6. What is verified vs. NOT verified (round 2)
 
-## 6. What is verified vs. NOT verified
+**Verified (this task, round 2):**
 
-**Verified (this task):**
+- 424 unit tests pass (up from 419 after round 1), 100% line/branch
+  coverage, `ruff check .` clean, `mypy app/` clean.
+- End-to-end equivalence proof through the FULL pipeline (not just the
+  parsing layer, which round 1 already proved) — `tests/unit/
+  test_ingestion_orchestrator.py
+  test_run_ingestion_pipeline_batched_matches_unbatched_icon_parent_across_batches`
+  runs the exact SA1.2 icon-fallback scenario through `run_ingestion_
+  pipeline` twice (batch size 1 -> 2 batches with the boundary literally
+  between the paragraph and the icon page; batch size 100 -> 1 batch),
+  queries the REAL persisted `elements` rows from the DB afterward, and
+  asserts both runs produce structurally identical rows, with both icons'
+  `parent_id` correctly resolving to the page-1 paragraph in BOTH runs (not
+  `NULL` in the batched run) — this specifically proves `local_id_to_db_id`
+  carries correctly through `store_pages_and_elements` across a real batch
+  boundary, not just `ParseCarryState` through parsing (round 1's proof).
+- `test_run_ingestion_pipeline_multi_batch_job_counts_and_order` proves the
+  `ingestion_jobs` interleaving described in §3.4, and that Docling's
+  `unload()` is now called once per batch while the PaddleOCR-VL client's
+  stays at once overall.
+- `test_store_pages_and_elements_expunges_created_objects_from_session`
+  (`tests/unit/test_ingestion_canonical_store.py`) is a direct regression
+  guard for the §2/§3.2 fix itself — asserts the SQLAlchemy session's
+  identity map contains ONLY the `document` object after a
+  `store_pages_and_elements` call, not the `Page`/`Element` objects it just
+  created.
+- `test_store_pages_and_elements_local_id_to_db_id_carries_parent_across_calls`
+  plus its explicit NEGATIVE counterpart (`..._without_shared_dict_orphans_
+  cross_call_parent`, asserting `parent_id IS NULL` when the dict is NOT
+  carried) together prove the carry is load-bearing, not incidental.
 
-- 419 unit tests pass, including new ones proving batched output is
-  semantically identical to unbatched output — see
-  `tests/unit/test_ingestion_docling_parser.py`
-  `test_batched_parse_matches_single_pass_icon_fallback_across_batch_boundary`
-  (the exact SA1.2 icon-fallback scenario, deliberately split across a
-  batch boundary) and `test_batched_parse_matches_single_pass_section_path_across_batch_boundary`.
-  Both assert element-for-element equality between one unbatched
-  `map_document_to_elements` call and two batched calls merged.
-- `_run_docling_in_batches` unit-tested directly (correct page-window
-  slicing, correct `carry_state` threading, correct merge, input
-  validation) in `tests/unit/test_ingestion_orchestrator.py`.
-- 100% branch/line coverage maintained (`app/ingestion/docling_parser.py`,
-  `app/ingestion/orchestrator.py`), `ruff check .` clean, `mypy app/` clean.
+**NOT verified (environment constraint, stated honestly, same limitation as
+round 1 — WSL got LESS stable during round 2, not more):**
 
-**NOT verified (environment constraint, stated honestly per task brief):**
+- **No real Docling/Postgres run against the actual 567-page document for
+  round 2's fix specifically.** Round 1 WAS verified against real hardware
+  (that's how we know it still OOM'd, §2) — but round 2 could not be, given
+  WSL was reported failing within seconds even for small documents by the
+  time this round started (`wsl -l -v` showing repeated `Stopped` state).
+  All round-2 verification is via the mocked/fake-object unit test suite
+  (§6 above), which proves mapping/storage correctness and (via the
+  identity-map assertion) proves the SPECIFIC mechanism believed
+  responsible (`expire_on_commit=False` + un-expunged objects) is now
+  fixed for what it can observe in-process — but cannot reproduce or
+  re-measure the actual WSL kernel-level OOM.
+- **No before/after peak-memory (`anon-rss`) measurement for round 2.**
+  The claim "this fixes the remaining OOM" rests on: (a) round 1's own real
+  measurement (§2) isolating the remaining problem to something OTHER than
+  Docling's per-conversion memory (already fixed and confirmed working),
+  (b) `expire_on_commit=False` being an actual, confirmed (read directly
+  from `app/db/engine.py`) session configuration whose documented behavior
+  matches the failure mode, and (c) the identity-map regression test in §6
+  directly proving objects no longer accumulate in-session. It does NOT
+  rest on a new real measurement, because WSL was not available to take one
+  during this round.
+- Recommended next step, unchanged in spirit from round 1: once WSL is
+  stable again, re-attempt the 567-page document and record peak `anon-rss`
+  before considering this fully closed. If it STILL OOMs after round 2,
+  the next things to check, in order: (1) whether `gc.collect()` calls are
+  actually reclaiming what's expected on the real Linux/WSL allocator (vs.
+  Python holding freed memory in its own arena without returning it to the
+  OS — a different, harder problem `gc.collect()` alone doesn't solve), (2)
+  whether `INGESTION_PAGE_BATCH_SIZE=100` needs to be lowered further, (3)
+  subprocess-per-batch escalation (§4).
 
-- **No real Docling run against the actual 567-page Zeggo VRV III PDF was
-  performed.** WSL was unstable throughout this task (repeated
-  restarts/crashes per the task brief), and `backend/.venv-wsl` (the only
-  environment with Docling/torch installed for real ingestion) was
-  explicitly off-limits for Backend Engineer to use in this task. All
-  verification here is via the mocked/fake-object unit test suite, which
-  proves the *mapping logic and merge correctness* but cannot measure real
-  peak memory.
-- **No before/after peak-memory measurement was taken.** The claim "this
-  should fix the OOM" rests on: (a) the hard log evidence in §1 pointing at
-  Docling's per-`convert()`-call memory scaling with page count, (b)
-  confirming from Docling's own source that `page_range` genuinely
-  restricts which pages are loaded (not just post-filtered after loading
-  everything — see `docling/backend/docling_parse_backend.py`), and (c) the
-  explicit memory-release additions in §4. It does NOT rest on a measured
-  before/after number, because that measurement was not possible in this
-  environment during this task.
-- Recommended next step once WSL/`backend/.venv-wsl` is stable again:
-  ingest the two remaining documents (Zeggo VRV III, 567 pages; Zeggo VRV
-  X, 297 pages) for real and record peak `anon-rss` (e.g. via
-  `/usr/bin/time -v` or a background `free -h` poll) before vs. after this
-  change, ideally on the 567-page document specifically since that's the
-  one with a reproducible 3x failure history.
+## 7. Resumability — partially delivered (was fully scoped out in round 1)
 
-## 7. Scoped out (not implemented this pass)
+Round 1 scoped this out entirely. Round 2's restructuring **incidentally
+delivers a real, if partial, improvement**, since `store_pages_and_elements`
+is now called (and internally `db.commit()`s) once per batch instead of
+once per document:
 
-- **Full crash-resume** (skip already-completed batches when a Celery task
-  retries after a mid-run crash). The task brief called this "ideally"
-  (`idealnya`), not mandatory. Real resumability would require moving
-  `canonical_store.store_pages_and_elements` to a per-batch/incremental
-  commit model (carrying `local_id_to_db_id` across batches the same way
-  `ParseCarryState` carries Docling's own state) — a materially larger
-  change to already-tested, working code that this task's environment
-  instability made too risky to build and validate with confidence in the
-  time available. Flagged as a follow-up, not silently dropped — see
-  STATUS REPORT.
+- **Delivered**: if an ingestion run crashes partway through a large
+  document, all FULLY-COMPLETED batches up to that point are durably
+  committed in Postgres (not lost/rolled back). A subsequent retry that
+  re-runs the whole pipeline from scratch will re-parse everything with
+  Docling again (wasted compute, not correctness-affecting), but
+  `store_pages_and_elements`'s pre-existing `page_hash` idempotency check
+  means already-unchanged, already-stored pages are SKIPPED at the storage
+  layer (no re-render/re-upload/re-insert) even on a from-scratch retry —
+  so a retry after a crash is CHEAPER than the very first attempt, even
+  though it isn't a true "resume from where it left off".
+- **NOT delivered**: true resume-without-re-parsing (skip Docling entirely
+  for already-completed batches on retry). This would require persisting
+  `ParseCarryState` itself somewhere durable at each batch boundary (it
+  currently only lives in the orchestrator's local Python variables,
+  lost on process crash/restart) — a real schema change, judged out of
+  scope for this task given: (a) it was explicitly framed as a "bonus, you
+  decide" item, not a requirement, (b) WSL/Postgres instability made it
+  impossible to validate a schema change with any confidence this round,
+  and (c) the partial improvement above already meaningfully reduces
+  wasted work on retry without that risk. Flagged as a follow-up
+  candidate, not silently dropped.

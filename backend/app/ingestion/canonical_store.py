@@ -27,6 +27,41 @@ pages — that "skip before even running Docling" optimization would need
 Stage 1 (cheap) to compute page hashes and compare against the DB *before*
 invoking Stage 2, which is an orchestration concern for I1.10, not
 implemented here.
+
+**[2026-08-11, page-range batching round 2 — real OOM still observed with
+round 1's Docling-only batching, see STATUS REPORT]** `store_pages_and_
+elements` is now called ONCE PER BATCH by `app/ingestion/orchestrator.py`
+(a `page_range` subset of the document) instead of once for the whole
+document. Two changes support this:
+
+- `page_range` (optional, defaults to `(1, parse_result.page_count)` — the
+  old whole-document behavior when omitted) bounds which page numbers this
+  call processes, instead of always `range(1, parse_result.page_count + 1)`.
+- `local_id_to_db_id` (optional dict, mutated in place) lets the caller
+  carry the `ElementDraft.local_id -> elements.id` mapping ACROSS calls —
+  needed because an element in a later batch can have `parent_local_id`
+  pointing at an element stored in an EARLIER batch (e.g. the SA1.2
+  document-wide icon-parent fallback, `docling_parser.py`
+  `last_text_local_id_doc`) — without carrying this dict, that cross-batch
+  `parent_id` FK would silently resolve to `NULL` instead of the real
+  parent, exactly the bug class SA1.2 already fixed for the unbatched case.
+  When omitted, a fresh dict is used internally (old single-call behavior,
+  unaffected by this change).
+
+Also new: every `Page`/`Element` ORM object is explicitly `db.expunge()`d
+from the session right after this function no longer needs it (once its
+`.id` has been captured into a plain int, and any KG-candidate attribute
+mutations on it have been flushed). This matters because the project's
+`Session` is built with `expire_on_commit=False`
+(`app/db/engine.py`) — meaning a `db.commit()` alone does NOT release
+previously-loaded objects' attribute state (text/bbox/kg_candidate jsonb
+payloads stay fully resident in the session's identity map for the
+session's entire lifetime otherwise). For a 567-page document that is
+thousands of fully-loaded `Element` rows accumulating for the rest of the
+ingestion run even though they're already durably committed — the
+remaining real O(document) memory sink round 1's Docling-only batching
+left unaddressed. See `docs/ingestion-page-range-batching.md` §2 (round 2)
+for the full investigation.
 """
 
 from __future__ import annotations
@@ -167,6 +202,8 @@ def store_pages_and_elements(
     parse_result: DoclingParseResult,
     cascade_results: list[CascadeResult] | None = None,
     kg_candidates: dict[int, ElementKGCandidates] | None = None,
+    page_range: tuple[int, int] | None = None,
+    local_id_to_db_id: dict[int, int] | None = None,
 ) -> CanonicalStoreSummary:
     """Persist Stage 2 (+ optional Stage 4, + optional I1.9 KG candidates)
     output for `document`.
@@ -181,6 +218,10 @@ def store_pages_and_elements(
     .local_id` used throughout this function — entries are written to
     `elements.kg_candidate_entities`/`kg_candidate_relations` (default `[]`
     when absent, per `06-data-schema.md` §1).
+
+    `page_range`/`local_id_to_db_id` are for page-range batching (see
+    module docstring, 2026-08-11 round 2) — both default to the pre-batching
+    single-call behavior when omitted.
     """
     kg_candidates = kg_candidates or {}
     summary = CanonicalStoreSummary(document_id=document.id)
@@ -189,7 +230,9 @@ def store_pages_and_elements(
         for r in (cascade_results or [])
         if r.task.element_local_id is not None
     }
-    local_id_to_db_id: dict[int, int] = {}
+    if local_id_to_db_id is None:
+        local_id_to_db_id = {}
+    effective_page_range = page_range if page_range is not None else (1, parse_result.page_count)
 
     elements_by_page: dict[int, list[ElementDraft]] = {}
     for draft in parse_result.elements:
@@ -197,7 +240,7 @@ def store_pages_and_elements(
 
     pdf_doc = pymupdf.open(pdf_path)
     try:
-        for page_number in range(1, parse_result.page_count + 1):
+        for page_number in range(effective_page_range[0], effective_page_range[1] + 1):
             pymupdf_page = pdf_doc[page_number - 1]
             page_hash = compute_page_hash(pymupdf_page)
 
@@ -209,6 +252,7 @@ def store_pages_and_elements(
 
             if existing_page is not None and existing_page.page_hash == page_hash:
                 summary.pages_skipped += 1
+                db.expunge(existing_page)
                 continue
 
             if existing_page is not None:
@@ -238,6 +282,12 @@ def store_pages_and_elements(
             )
             db.add(new_page)
             db.flush()
+            # [2026-08-11, O(batch) memory fix] capture the plain int now —
+            # `new_page` itself is `db.expunge()`d at the end of this page's
+            # block (see module docstring: `expire_on_commit=False` means a
+            # later `db.commit()` alone would NOT release it), so nothing
+            # below this point may keep touching the `new_page` ORM object.
+            new_page_id = new_page.id
 
             for draft in elements_by_page.get(page_number, []):
                 parent_db_id = (
@@ -272,7 +322,7 @@ def store_pages_and_elements(
 
                 element_row = Element(
                     document_id=document.id,
-                    page_id=new_page.id,
+                    page_id=new_page_id,
                     element_type=draft.element_type,
                     text=text,
                     bbox=draft.bbox,
@@ -309,8 +359,24 @@ def store_pages_and_elements(
                         relation_dict["element_id"] = element_row.id
                     element_row.kg_candidate_entities = kg_entities
                     element_row.kg_candidate_relations = kg_relations
+                    # The two attribute assignments above are pending-dirty
+                    # (session `autoflush=False`, app/db/engine.py) — flush
+                    # NOW, before expunging below, or they would be silently
+                    # discarded rather than persisted.
+                    db.flush()
+
+                # [2026-08-11, O(batch) memory fix] `local_id_to_db_id[draft
+                # .local_id]` (a plain int, captured above) is everything any
+                # LATER element/batch needs to resolve a `parent_id` FK to
+                # this element — the ORM object itself (holding `text`/
+                # `bbox`/jsonb payloads in memory) is not needed again after
+                # this point. `expire_on_commit=False` (module docstring)
+                # means it would otherwise stay fully loaded in the
+                # session's identity map for the rest of the ingestion run.
+                db.expunge(element_row)
 
             summary.pages_stored += 1
+            db.expunge(new_page)
 
         db.commit()
     finally:

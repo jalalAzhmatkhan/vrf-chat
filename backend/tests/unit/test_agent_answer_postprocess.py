@@ -339,31 +339,101 @@ def test_safety_net_already_refused_left_untouched() -> None:
     answer = TechnicalAnswer(answer="I don't know.", confidence=0.0, refused=True)
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=1, any_chunks_retrieved=False
+        answer, tool_call_count=1, any_chunks_retrieved=False, user_message="anything"
     )
 
     assert result is answer
 
 
 def test_safety_net_no_tool_calls_conversational_turn_untouched() -> None:
-    answer = TechnicalAnswer(answer="Hello! How can I help?", confidence=0.9)
+    """§6.1.6 exemption (1) — the user's own message matches the closed
+    conversational-pattern list. The answer text deliberately does NOT end
+    with "?" so this cannot accidentally pass via exemption (2) instead —
+    this must exercise `_matches_conversational_pattern`, not the
+    clarifying-reply heuristic (see `test_safety_net_no_tool_calls_clarifying_reply_untouched`
+    below for that one)."""
+    answer = TechnicalAnswer(
+        answer="Hello! I'm ready to help with your VRF/VRV questions.", confidence=0.9
+    )
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=0, any_chunks_retrieved=False
+        answer, tool_call_count=0, any_chunks_retrieved=False, user_message="hello"
     )
 
     assert result.refused is False
     assert result is answer
 
 
+def test_safety_net_no_tool_calls_clarifying_reply_untouched() -> None:
+    """§6.1.6 exemption (2) — the agent's own answer looks like a clarifying
+    question back to the user (ends with "?"), even though the user's
+    message itself does NOT match the conversational-pattern list (so this
+    cannot accidentally pass via exemption (1) instead)."""
+    answer = TechnicalAnswer(answer="Which unit model are you using?", confidence=0.5)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer, tool_call_count=0, any_chunks_retrieved=False, user_message="my AC is broken"
+    )
+
+    assert result.refused is False
+    assert result is answer
+
+
+def test_safety_net_no_tool_calls_no_exemption_forces_refuse() -> None:
+    """§6.1.6 — the actual BLOCKER case (F2C2-01): a factual question
+    answered straight from parametric knowledge with zero tool calls, no
+    greeting/closing, no clarifying "?" — must be force-refused, with
+    `answer` replaced by the canonical refusal text and `citations` emptied
+    (F2C2-04/§6.1.7 amendment), even though the model attached a
+    citation."""
+    citation = Citation(document_id="3", page=1, element_id="1", element_type="paragraph")
+    answer = TechnicalAnswer(
+        answer="France won the 2018 FIFA World Cup.",
+        confidence=1.0,
+        citations=[citation],
+    )
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=0,
+        any_chunks_retrieved=False,
+        user_message="Who won the 2018 FIFA World Cup?",
+    )
+
+    assert result.refused is True
+    assert result.answer == pp.NO_EVIDENCE_REFUSAL_TEXT
+    assert result.citations == []
+    assert any(w.message == pp.NO_EVIDENCE_WARNING.message for w in result.warnings)
+
+
+def test_safety_net_no_tool_calls_no_exemption_forces_refuse_math_question() -> None:
+    """Second BLOCKER repro from QA (F2C2-01) — a different flavor of
+    zero-tool-call factual answer, to guard against a fix that only
+    special-cases trivia-style questions."""
+    answer = TechnicalAnswer(answer="The square root of 144 is 12.", confidence=1.0)
+
+    result = pp.enforce_never_invent_safety_net(
+        answer,
+        tool_call_count=0,
+        any_chunks_retrieved=False,
+        user_message="What is the square root of 144?",
+    )
+
+    assert result.refused is True
+    assert result.answer == pp.NO_EVIDENCE_REFUSAL_TEXT
+    assert result.citations == []
+
+
 def test_safety_net_tool_called_but_nothing_retrieved_and_no_citations_forces_refuse() -> None:
     answer = TechnicalAnswer(answer="Here is a made-up answer.", confidence=0.9)
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=1, any_chunks_retrieved=False
+        answer, tool_call_count=1, any_chunks_retrieved=False, user_message="anything"
     )
 
     assert result.refused is True
+    assert result.answer == pp.NO_EVIDENCE_REFUSAL_TEXT
+    assert result.citations == []
     assert any(w.message == pp.NO_EVIDENCE_WARNING.message for w in result.warnings)
 
 
@@ -371,7 +441,7 @@ def test_safety_net_tool_called_and_chunks_retrieved_not_forced() -> None:
     answer = TechnicalAnswer(answer="Grounded answer.", confidence=0.9)
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=1, any_chunks_retrieved=True
+        answer, tool_call_count=1, any_chunks_retrieved=True, user_message="anything"
     )
 
     assert result.refused is False
@@ -382,7 +452,7 @@ def test_safety_net_tool_called_no_chunks_but_has_citations_not_forced() -> None
     answer = TechnicalAnswer(answer="Answer with citation.", confidence=0.9, citations=[citation])
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=1, any_chunks_retrieved=False
+        answer, tool_call_count=1, any_chunks_retrieved=False, user_message="anything"
     )
 
     assert result.refused is False
@@ -411,11 +481,14 @@ def test_safety_net_below_threshold_forces_refuse_even_with_whitelisted_citation
         answer,
         tool_call_count=1,
         any_chunks_retrieved=True,
+        user_message="What is the capital of France?",
         max_dense_relevance_score=0.6609,  # exact round-1 out-of-scope ceiling, §6.1.3
         any_exact_evidence_found=False,
     )
 
     assert result.refused is True
+    assert result.answer == pp.NO_EVIDENCE_REFUSAL_TEXT
+    assert result.citations == []  # F2C2-04/§6.1.7 amendment
     assert any(w.message == pp.NO_EVIDENCE_WARNING.message for w in result.warnings)
 
 
@@ -432,6 +505,7 @@ def test_safety_net_above_threshold_not_forced() -> None:
         answer,
         tool_call_count=1,
         any_chunks_retrieved=True,
+        user_message="Mitsubishi check code 1102 PUHY-P",
         max_dense_relevance_score=0.7486,
         any_exact_evidence_found=False,
     )
@@ -448,6 +522,7 @@ def test_safety_net_exactly_at_threshold_not_forced() -> None:
         answer,
         tool_call_count=1,
         any_chunks_retrieved=True,
+        user_message="anything",
         max_dense_relevance_score=pp.MIN_RELEVANCE_SCORE,
         any_exact_evidence_found=False,
     )
@@ -470,6 +545,7 @@ def test_safety_net_below_threshold_but_exact_evidence_found_not_forced() -> Non
         answer,
         tool_call_count=1,
         any_chunks_retrieved=True,
+        user_message="What does error code P8 mean?",
         max_dense_relevance_score=0.4932,  # well below threshold
         any_exact_evidence_found=True,
     )
@@ -487,6 +563,7 @@ def test_safety_net_no_semantic_search_this_turn_relevance_branch_inapplicable()
         answer,
         tool_call_count=1,
         any_chunks_retrieved=True,
+        user_message="show me page 60",
         max_dense_relevance_score=None,
         any_exact_evidence_found=False,
     )
@@ -497,12 +574,14 @@ def test_safety_net_no_semantic_search_this_turn_relevance_branch_inapplicable()
 def test_safety_net_defaults_preserve_pre_6_1_behavior() -> None:
     """Sanity: omitting the two new §6.1 kwargs entirely (as every call site
     predating this change does) must behave identically to before — this is
-    exactly what F2-03's original (pre-§6.1) fix relied on."""
+    exactly what F2-03's original (pre-§6.1) fix relied on. `user_message`
+    itself is NOT optional (mandatory for the §6.1.6 gate), unlike the two
+    §6.1 relevance-floor kwargs — only those two retain defaults."""
     citation = Citation(document_id="3", page=282, element_id="99", element_type="section")
     answer = TechnicalAnswer(answer="Some answer.", confidence=0.9, citations=[citation])
 
     result = pp.enforce_never_invent_safety_net(
-        answer, tool_call_count=1, any_chunks_retrieved=True
+        answer, tool_call_count=1, any_chunks_retrieved=True, user_message="anything"
     )
 
     assert result.refused is False

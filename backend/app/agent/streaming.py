@@ -46,6 +46,28 @@ and degrades: the already-streamed text becomes the final `answer`
 run through the same two mandatory gates below, so any `{{el:ID}}` markers
 already in that partial text are still validated/backfilled normally), and
 the turn still ends in a `done` event rather than being thrown away.
+
+**F2C2-08 (`Documentation/qa-reports/phase-2-qa-report-cycle2.md`) —
+graceful degradation on `UsageLimitExceeded`**: F2-06's round-trip cap
+(`DEFAULT_MAX_REQUESTS_PER_TURN`, `app/agent/vrf_agent.py`) working exactly
+as designed still previously discarded the entire turn as a generic
+`provider_error` the instant `pydantic_ai` raised
+`pydantic_ai.exceptions.UsageLimitExceeded` — QA measured this hitting 4/9
+turns with `gpt-4o-mini` (a *more* compliant model calls *more* tools, so
+it hits the cap more often, not less). Same fix philosophy as F2-01 above,
+extended to this exception: if any `answer` text had already streamed
+before the limit was hit, that text becomes the final answer (through the
+same two mandatory gates, same as F2-01); if nothing had streamed yet (the
+limit was hit mid tool-call loop, before the model ever started producing
+its final answer), a purpose-built, informative `refused=True` answer
+(`USAGE_LIMIT_ANSWER` below) is used instead of an empty string — telling
+the user their question needed too many search steps, not just "something
+went wrong". `run_turn_with_metrics` (non-streaming path) gets the same
+treatment for the same reason: previously an uncaught `UsageLimitExceeded`
+there would propagate all the way to `app/api/v1/chat.py`'s `POST
+/api/v1/chat` handler as an unhandled exception (bare HTTP 500, and no
+assistant message ever persisted even though the user's message already
+was).
 """
 
 from __future__ import annotations
@@ -58,7 +80,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UnexpectedModelBehavior
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.usage import UsageLimits
@@ -82,6 +104,21 @@ TIMEOUT_ANSWER = TechnicalAnswer(
     answer=(
         "Sorry, the request took too long to process and was stopped. Please try again — "
         "if this keeps happening, try a shorter or more specific question."
+    ),
+    confidence=0.0,
+    refused=True,
+)
+
+# F2C2-08 — used only when `UsageLimitExceeded` is hit before any `answer`
+# text had streamed yet (see module docstring). Mirrors `TIMEOUT_ANSWER`'s
+# shape/rationale, but with wording specific to this failure mode (a
+# round-trip-count cap, not a wall-clock timeout) so the user gets an
+# actionable hint (narrow the question) rather than a generic retry prompt.
+USAGE_LIMIT_ANSWER = TechnicalAnswer(
+    answer=(
+        "Sorry, this question needed more search steps than allowed and could not be fully "
+        "answered. Please try breaking it into a narrower, more specific question — for "
+        "example, a single error code, unit model, or component name."
     ),
     confidence=0.0,
     refused=True,
@@ -159,6 +196,16 @@ async def run_turn_with_metrics(
         return TurnResult(
             answer=TIMEOUT_ANSWER, ttft_ms=elapsed_ms, total_latency_ms=elapsed_ms, timed_out=True
         )
+    except UsageLimitExceeded:
+        # F2C2-08 — see module docstring. No partial-text tracking exists on
+        # this non-streaming path (`agent.run` isn't incremental), so this
+        # always uses the fixed `USAGE_LIMIT_ANSWER`, unlike `stream_turn`
+        # below which prefers already-streamed text when there is any.
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        logger.warning("chat.turn.usage_limit_exceeded", extra={"timeout_seconds": timeout_seconds})
+        return TurnResult(
+            answer=USAGE_LIMIT_ANSWER, ttft_ms=elapsed_ms, total_latency_ms=elapsed_ms
+        )
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
     log_confidence_anomaly_if_needed(answer)  # F2-09, §5.0
@@ -212,6 +259,7 @@ async def stream_turn(
 
     raw_output: TechnicalAnswer | None = None
     previous_text = ""
+    usage_limit_exceeded = False
 
     try:
         async with asyncio.timeout(timeout_seconds):
@@ -263,6 +311,27 @@ async def stream_turn(
             ),
         )
         return
+    except UsageLimitExceeded:
+        # F2C2-08 — see module docstring. Deliberately does NOT `return`
+        # here (unlike the `TimeoutError`/`Exception` handlers above): this
+        # falls through to the shared degrade-and-continue logic below
+        # (`if raw_output is None: ...`) exactly like the inner
+        # `UnexpectedModelBehavior` handler does for F2-01, so a turn that
+        # made real progress before hitting the round-trip cap still ends
+        # in a normal `done` event carrying whatever text/citations it
+        # already earned, not a discarded `error`. Caught here (the OUTER
+        # try) rather than alongside `UnexpectedModelBehavior` in the inner
+        # one because `check_before_request` (pydantic_ai's internal
+        # enforcement point) can raise this either during
+        # `result.stream_output()` iteration OR while `agent.run_stream()`
+        # itself is preparing the next request — catching only at the outer
+        # level covers both without needing to know pydantic_ai's internal
+        # call sequencing.
+        usage_limit_exceeded = True
+        logger.warning(
+            "chat.stream.usage_limit_exceeded_degraded",
+            extra={"partial_answer_length": len(previous_text)},
+        )
     except Exception:  # noqa: BLE001 — any other provider/transport failure becomes an `error` event
         logger.exception("chat.stream.provider_error")
         yield format_sse_event(
@@ -275,12 +344,26 @@ async def stream_turn(
         return
 
     if raw_output is None:
-        # F2-01 degraded path — build the best available TechnicalAnswer
-        # from whatever streamed successfully, then run it through the
-        # exact same two mandatory gates as the happy path below (so any
-        # `{{el:ID}}` markers already in `previous_text` are still
-        # validated/backfilled, not just passed through raw).
-        raw_output = TechnicalAnswer(answer=previous_text, confidence=0.0)
+        if usage_limit_exceeded and not previous_text:
+            # F2C2-08 — nothing had streamed yet (the cap was hit mid
+            # tool-call loop, before the model ever started producing its
+            # final answer): use the purpose-built, informative refusal
+            # instead of an empty-string answer that would otherwise sail
+            # past `enforce_never_invent_safety_net` unexplained whenever
+            # this turn's tool calls happened to retrieve something
+            # relevant (`tool_call_count > 0` here, so the §6.1.6 zero-tool
+            # gate does not apply and would not catch this case on its
+            # own).
+            raw_output = USAGE_LIMIT_ANSWER
+        else:
+            # F2-01 degraded path (also covers F2C2-08 when SOME answer
+            # text had already streamed) — build the best available
+            # TechnicalAnswer from whatever streamed successfully, then run
+            # it through the exact same two mandatory gates as the happy
+            # path below (so any `{{el:ID}}` markers already in
+            # `previous_text` are still validated/backfilled, not just
+            # passed through raw).
+            raw_output = TechnicalAnswer(answer=previous_text, confidence=0.0)
 
     context = BuiltContext(elements_by_id=deps.context_elements)
     post_result = postprocess_answer(

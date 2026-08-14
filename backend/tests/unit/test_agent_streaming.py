@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from sqlalchemy import create_engine
@@ -105,6 +106,29 @@ async def test_run_turn_with_metrics_timeout(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.timed_out is True
     assert result.answer == st.TIMEOUT_ANSWER
+    assert result.answer.refused is True
+
+
+async def test_run_turn_with_metrics_usage_limit_exceeded_degrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2C2-08 — a `UsageLimitExceeded` raised by `run_agent_turn` (F-06's
+    round-trip cap tripping) must NOT propagate as an unhandled exception
+    (previously an uncaught bare HTTP 500 at `app/api/v1/chat.py`'s `POST
+    /api/v1/chat`, with the user's message persisted but no assistant
+    response ever recorded) — it must degrade to `USAGE_LIMIT_ANSWER`,
+    exactly like the timeout path degrades to `TIMEOUT_ANSWER`."""
+    db = _make_session()
+
+    async def _capped_run_agent_turn(*args: Any, **kwargs: Any) -> TechnicalAnswer:
+        raise UsageLimitExceeded("The next request would exceed the request_limit of 8")
+
+    monkeypatch.setattr(st, "run_agent_turn", _capped_run_agent_turn)
+
+    result = await st.run_turn_with_metrics(object(), _deps(db), "hello")
+
+    assert result.timed_out is False
+    assert result.answer == st.USAGE_LIMIT_ANSWER
     assert result.answer.refused is True
 
 
@@ -242,6 +266,13 @@ async def test_stream_turn_output_validation_failure_degrades_instead_of_discard
     away as an `error`."""
     db = _make_session()
     deps = _deps(db)
+    # §6.1.6 — the real QA repro this test reproduces DID call a search tool
+    # (that's how the citation/context came about in the first place); a
+    # zero-tool-call turn would now be force-refused by the reversed
+    # `tool_call_count == 0` default before this F2-01 degrade path is even
+    # relevant, which would defeat the point of this test.
+    deps.tool_call_count = 1
+    deps.any_chunks_retrieved = True
     payload = {
         "answer": "See the reset button on the panel.",
         "confidence": 0.9,
@@ -298,6 +329,10 @@ async def test_stream_turn_output_validation_failure_still_validates_markers() -
         page=238,
     )
     deps.context_elements = {42: icon_element}
+    # §6.1.6 — see comment in the preceding test for why this is required
+    # now that a zero-tool-call turn defaults to force-refuse.
+    deps.tool_call_count = 1
+    deps.any_chunks_retrieved = True
     payload = {
         "answer": "Press {{el:42}} to reset.",
         "confidence": 0.9,
@@ -382,6 +417,99 @@ async def test_stream_turn_provider_error_emits_error_event() -> None:
     assert events[-1][1]["message"] == st.SAFE_PROVIDER_ERROR_MESSAGE
     assert "RuntimeError" not in events[-1][1]["message"]
     assert "boom" not in events[-1][1]["message"]
+
+
+# ---------------------------------------------------------------------------
+# stream_turn — F2C2-08 UsageLimitExceeded graceful degradation
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_turn_usage_limit_exceeded_before_any_text_uses_informative_refusal() -> None:
+    """F2C2-08 — the round-trip cap (F2-06) tripping before the model ever
+    started producing its final answer must NOT end in a generic
+    `provider_error` (previous behavior, QA-measured 4/9 turns with
+    `gpt-4o-mini`) — it must end in a normal `done` event carrying the
+    purpose-built `USAGE_LIMIT_ANSWER` refusal, not an empty string."""
+    db = _make_session()
+    deps = _deps(db)
+
+    async def _immediately_capped_stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        raise UsageLimitExceeded("The next request would exceed the request_limit of 8")
+        yield {}  # pragma: no cover — makes this an async generator function
+
+    agent: Agent[AgentDeps, TechnicalAnswer] = Agent(
+        FunctionModel(function=lambda m, i: None, stream_function=_immediately_capped_stream_fn),
+        deps_type=AgentDeps,
+        output_type=TechnicalAnswer,
+    )
+
+    raw_events = [
+        event async for event in st.stream_turn(agent, deps, "a very broad multi-part question")
+    ]
+    events = _parse_sse_events(raw_events)
+
+    assert all(name != "error" for name, _ in events)
+    assert events[-1][0] == "done"
+    done_payload = events[-1][1]
+    assert done_payload["answer"] == st.USAGE_LIMIT_ANSWER.answer
+    assert done_payload["refused"] is True
+    assert done_payload["citations"] == []
+
+
+async def test_stream_turn_usage_limit_exceeded_with_partial_text_keeps_streamed_answer() -> None:
+    """F2C2-08 — if the model had already started streaming `answer` text
+    before the cap was hit, that text is kept (same F2-01 degrade
+    philosophy) instead of being discarded in favor of the generic
+    refusal — the generic refusal is only a fallback for the empty-text
+    case above."""
+    db = _make_session()
+    deps = _deps(db)
+    deps.tool_call_count = 1
+    deps.any_chunks_retrieved = True
+    payload = {
+        "answer": "Here is a partial troubleshooting step that already streamed.",
+        "confidence": 0.9,
+        "citations": [],
+        "warnings": [],
+        "related_components": [],
+        "related_error_codes": [],
+        "refused": False,
+    }
+    full_args = json.dumps(payload)
+    # Cut off partway through the "answer" string value — enough that
+    # partial JSON parsing has already exposed a non-empty `answer` prefix,
+    # short of the full text, before the cap is hit.
+    cutoff = full_args.index('"answer": "') + len('"answer": "Here is a partial')
+
+    async def _stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        tool_name = info.output_tools[0].name
+        prefix = full_args[:cutoff]
+        chunk_size = 8
+        for i in range(0, len(prefix), chunk_size):
+            piece = prefix[i : i + chunk_size]
+            yield {0: DeltaToolCall(name=tool_name if i == 0 else None, json_args=piece)}
+            await asyncio.sleep(0.12)
+        raise UsageLimitExceeded("The next request would exceed the request_limit of 8")
+        yield {}  # pragma: no cover — makes this an async generator function
+
+    agent: Agent[AgentDeps, TechnicalAnswer] = Agent(
+        FunctionModel(function=lambda m, i: None, stream_function=_stream_fn),
+        deps_type=AgentDeps,
+        output_type=TechnicalAnswer,
+    )
+
+    raw_events = [
+        event async for event in st.stream_turn(agent, deps, "how do I fix error P8?")
+    ]
+    events = _parse_sse_events(raw_events)
+
+    assert all(name != "error" for name, _ in events)
+    assert events[-1][0] == "done"
+    done_payload = events[-1][1]
+    assert done_payload["answer"] != ""
+    assert payload["answer"].startswith(done_payload["answer"])
+    assert done_payload["confidence"] == 0.0
+    assert done_payload["answer"] != st.USAGE_LIMIT_ANSWER.answer
 
 
 # ---------------------------------------------------------------------------

@@ -418,8 +418,18 @@ def enforce_never_invent_safety_net(
     the only applicable check in that case, exactly as before §6.1.
 
     **F2C2-04/§6.1.7**: whichever branch forces a refusal, `answer.answer`
-    is replaced with `NO_EVIDENCE_REFUSAL_TEXT` (not just `refused`/
-    `warnings`) — see that constant's docstring for why.
+    is replaced with `NO_EVIDENCE_REFUSAL_TEXT` and `answer.citations` is
+    replaced with `[]` (not just `refused`/`warnings`) — see that constant's
+    docstring for why the `answer` half matters, and the §6.1.4 amendment
+    note (this module's `postprocess_answer` docstring cross-reference in
+    `03-retrieval-chunking.md` §6.1.4/§6.1.7) for why `citations` must be
+    cleared too: `postprocess_answer` (F2-02 validation/backfill,
+    potentially §6.1.9's future citation fallback) always runs *before*
+    this gate (see call order in `app/agent/vrf_agent.py::run_agent_turn`),
+    so a force-refused turn could otherwise still carry citations that were
+    genuinely retrieved but not relevant (branch 2) or retrieved at all
+    (branch 0) — the exact same "retrieved but not the grounds for this
+    answer" contradiction F2C2-04 fixed for `answer` text.
 
     **Explicitly out of scope, by calibrated design** (`03-retrieval-chunking.md`
     §6.1.3 round 2 / §6.1.8): domain-adjacent near-miss questions (e.g. "how
@@ -452,6 +462,7 @@ def enforce_never_invent_safety_net(
             update={
                 "refused": True,
                 "answer": NO_EVIDENCE_REFUSAL_TEXT,
+                "citations": [],  # §6.1.7/F2C2-04 amendment — see that section's docstring
                 "warnings": [*answer.warnings, NO_EVIDENCE_WARNING],
             }
         )
@@ -466,6 +477,7 @@ def enforce_never_invent_safety_net(
             update={
                 "refused": True,
                 "answer": NO_EVIDENCE_REFUSAL_TEXT,
+                "citations": [],  # §6.1.7/F2C2-04 amendment — see that section's docstring
                 "warnings": [*answer.warnings, NO_EVIDENCE_WARNING],
             }
         )

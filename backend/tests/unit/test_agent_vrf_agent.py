@@ -322,3 +322,20 @@ def test_dynamic_instructions_without_model_family() -> None:
 def test_static_system_prompt_mentions_never_invent_and_marker_rule() -> None:
     assert "NEVER INVENT" in vrf_agent.STATIC_SYSTEM_PROMPT
     assert "{{el:" in vrf_agent.STATIC_SYSTEM_PROMPT
+
+
+def test_static_system_prompt_instructs_always_search_before_answering() -> None:
+    """§6.1.6 mitigation — layer-2 request to the model on top of the
+    deterministic `tool_call_count == 0` gate in `answer_postprocess.py`."""
+    prompt = vrf_agent.STATIC_SYSTEM_PROMPT.upper()
+    assert "MUST CALL AT LEAST ONE SEARCH TOOL" in prompt
+
+
+def test_static_system_prompt_states_vrf_vrv_scope_for_domain_adjacent_mitigation() -> None:
+    """§6.1.8 point 2 — cheap mitigation for domain-adjacent near-miss
+    questions (e.g. car AC, household fridge) until the cross-encoder
+    reranker (§6.2) lands."""
+    prompt = vrf_agent.STATIC_SYSTEM_PROMPT
+    assert "VRF/VRV COMMERCIAL SYSTEMS ONLY" in prompt
+    assert "car" in prompt.lower()
+    assert "refrigerator" in prompt.lower()
